@@ -35,8 +35,14 @@ constexpr int kConfigIntermission = 12;
 constexpr int kConfigWolfInfo = 21;
 constexpr int kConfigPlayers = 689;
 constexpr int kEtEvents = 62;
+constexpr int kEvBullet = 61;
 constexpr int kEvObituary = 68;
+constexpr int kHitHeadshot = 2;
 constexpr int kEventBits = 0x300;
+// Playback opens five seconds before the first kill. Treat confirmed hits in
+// that same lead-in as part of the action when they are against a player who
+// is subsequently killed in the run. Never cross the attacker's last death.
+constexpr std::int32_t kActionLeadInMs = 5000;
 constexpr int kSvcNop = 1;
 constexpr int kSvcGamestate = 2;
 constexpr int kSvcConfigString = 3;
@@ -108,6 +114,7 @@ constexpr std::size_t kEsEType = 0;
 constexpr std::size_t kEsOtherEntityNum = 34;
 constexpr std::size_t kEsOtherEntityNum2 = 35;
 constexpr std::size_t kEsLoopSound = 37;
+constexpr std::size_t kEsModelIndex = 40;
 constexpr std::size_t kEsEvent = 45;
 constexpr std::size_t kEsEventParm = 46;
 constexpr std::size_t kEsWeapon = 57;
@@ -273,7 +280,8 @@ std::string unquoteCommandArgument(std::string_view value) {
 
 class ParserState {
 public:
-    explicit ParserState(std::filesystem::path path) {
+    ParserState(std::filesystem::path path, DemoParseOptions options)
+        : options_(options) {
         info_.path = std::move(path);
         resetGameState();
     }
@@ -282,6 +290,24 @@ public:
         std::ifstream input(info_.path, std::ios::binary);
         if (!input) {
             throw std::runtime_error("Could not open demo file: " + info_.path.string());
+        }
+
+        if (options_.collectProtocolLog) {
+            std::error_code sizeError;
+            const std::uintmax_t fileSize = std::filesystem::file_size(info_.path, sizeError);
+            if (!sizeError && fileSize <=
+                    static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max() / 6)) {
+                info_.protocolLog.reserve(static_cast<std::size_t>(fileSize) * 6 + 4096);
+            }
+            appendProtocolLine(
+                "FILE",
+                "path=\"" + escapeProtocolText(info_.path.u8string()) + "\"; bytes=" +
+                    (sizeError ? std::string("unknown") : std::to_string(fileSize)) +
+                    "; format=id Tech 3 demo protocol 84");
+            appendProtocolLine(
+                "INFO",
+                "Decoded records are followed by complete raw message hex rows. "
+                "Binary download payloads remain recoverable from those RAW rows.");
         }
 
         while (true) {
@@ -301,6 +327,9 @@ public:
                 break;
             }
             if (*length == -1) {
+                appendProtocolLine(
+                    "END",
+                    "terminal message marker; sequence=" + std::to_string(*sequence));
                 break;
             }
             if (*length < 0 || *length > 2 * 1024 * 1024) {
@@ -323,10 +352,161 @@ public:
         std::stable_sort(info_.kills.begin(), info_.kills.end(), [](const KillEvent& a, const KillEvent& b) {
             return a.serverTimeMs < b.serverTimeMs;
         });
+        appendProtocolLine(
+            "SUMMARY",
+            "map=\"" + escapeProtocolText(info_.mapName) + "\"; game=\"" +
+                escapeProtocolText(info_.gameName) + "\"; modVersion=\"" +
+                escapeProtocolText(info_.modVersion) + "\"; povClient=" +
+                std::to_string(info_.povClientNum) + "; pov=\"" +
+                escapeProtocolText(info_.povName) + "\"; players=" +
+                std::to_string(info_.players.size()) + "; obituaryEvents=" +
+                std::to_string(info_.kills.size()) + "; warnings=" +
+                std::to_string(info_.warnings.size()));
         return std::move(info_);
     }
 
 private:
+    static std::string escapeProtocolText(std::string_view value) {
+        static constexpr char digits[] = "0123456789ABCDEF";
+        std::string escaped;
+        escaped.reserve(value.size() + 16);
+        for (const unsigned char character : value) {
+            switch (character) {
+                case '\\': escaped += "\\\\"; break;
+                case '"': escaped += "\\\""; break;
+                case '\r': escaped += "\\r"; break;
+                case '\n': escaped += "\\n"; break;
+                case '\t': escaped += "\\t"; break;
+                default:
+                    if (character < 0x20 || character == 0x7f) {
+                        escaped += "\\x";
+                        escaped.push_back(digits[(character >> 4) & 0x0f]);
+                        escaped.push_back(digits[character & 0x0f]);
+                    } else {
+                        escaped.push_back(static_cast<char>(character));
+                    }
+                    break;
+            }
+        }
+        return escaped;
+    }
+
+    void appendProtocolLine(std::string_view category, const std::string& detail) {
+        if (!options_.collectProtocolLog) {
+            return;
+        }
+        std::ostringstream line;
+        line << std::setfill('0') << std::setw(8) << ++protocolLineNumber_
+             << " | msg=";
+        if (currentMessageSequence_ >= 0) {
+            line << currentMessageSequence_;
+        } else {
+            line << '-';
+        }
+        line << " | server=";
+        if (currentServerTimeMs_ >= 0) {
+            line << currentServerTimeMs_;
+        } else {
+            line << '-';
+        }
+        line << " | " << category << " | " << detail << "\r\n";
+        info_.protocolLog += line.str();
+    }
+
+    void appendRawMessage(const std::vector<std::uint8_t>& bytes) {
+        if (!options_.collectProtocolLog) {
+            return;
+        }
+        static constexpr char digits[] = "0123456789ABCDEF";
+        constexpr std::size_t bytesPerRow = 24;
+        for (std::size_t offset = 0; offset < bytes.size(); offset += bytesPerRow) {
+            const std::size_t count = std::min(bytesPerRow, bytes.size() - offset);
+            std::string hex;
+            std::string ascii;
+            hex.reserve(count * 3);
+            ascii.reserve(count);
+            for (std::size_t index = 0; index < count; ++index) {
+                const unsigned char value = bytes[offset + index];
+                if (!hex.empty()) hex.push_back(' ');
+                hex.push_back(digits[(value >> 4) & 0x0f]);
+                hex.push_back(digits[value & 0x0f]);
+                ascii.push_back(value >= 0x20 && value < 0x7f
+                                    ? static_cast<char>(value)
+                                    : '.');
+            }
+            std::ostringstream detail;
+            detail << "offset=0x" << std::uppercase << std::hex << std::setfill('0')
+                   << std::setw(8) << offset << "; hex=" << hex << "; ascii=\""
+                   << escapeProtocolText(ascii) << '"';
+            appendProtocolLine("RAW", detail.str());
+        }
+    }
+
+    static std::string configStringLabel(int index) {
+        if (index == kConfigServerInfo) return "CS_SERVERINFO";
+        if (index == kConfigWarmup) return "CS_WARMUP";
+        if (index == kConfigLevelStartTime) return "CS_LEVEL_START_TIME";
+        if (index == kConfigIntermission) return "CS_INTERMISSION";
+        if (index == kConfigWolfInfo) return "CS_WOLFINFO";
+        if (index >= kConfigPlayers && index < kConfigPlayers + kMaxClients) {
+            return "CS_PLAYERS+" + std::to_string(index - kConfigPlayers);
+        }
+        return "CS_" + std::to_string(index);
+    }
+
+    static float valueAsFloat(std::int32_t bits) {
+        float value = 0.0f;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+
+    void appendEntityState(std::string_view category, const EntityState& entity) {
+        if (!options_.collectProtocolLog) return;
+        std::ostringstream detail;
+        detail << "number=" << entity.number;
+        for (std::size_t index = 0; index < kEntityFields.size(); ++index) {
+            const NetField& field = kEntityFields[index];
+            detail << "; " << field.name << '=' << entity.values[index];
+            if (field.bits == 0) {
+                detail << "(float=" << valueAsFloat(entity.values[index]) << ')';
+            }
+        }
+        appendProtocolLine(category, detail.str());
+    }
+
+    template <std::size_t Size>
+    static void appendNumericArray(
+        std::ostringstream& detail,
+        const char* label,
+        const std::array<std::int32_t, Size>& values) {
+        detail << "; " << label << "=[";
+        for (std::size_t index = 0; index < Size; ++index) {
+            if (index != 0) detail << ',';
+            detail << values[index];
+        }
+        detail << ']';
+    }
+
+    void appendPlayerState(const PlayerState& state) {
+        if (!options_.collectProtocolLog) return;
+        std::ostringstream detail;
+        for (std::size_t index = 0; index < kPlayerFields.size(); ++index) {
+            if (index != 0) detail << "; ";
+            const NetField& field = kPlayerFields[index];
+            detail << field.name << '=' << state.values[index];
+            if (field.bits == 0) {
+                detail << "(float=" << valueAsFloat(state.values[index]) << ')';
+            }
+        }
+        appendNumericArray(detail, "stats", state.stats);
+        appendNumericArray(detail, "persistent", state.persistent);
+        appendNumericArray(detail, "holdable", state.holdable);
+        appendNumericArray(detail, "powerups", state.powerups);
+        appendNumericArray(detail, "ammo", state.ammo);
+        appendNumericArray(detail, "ammoClip", state.ammoClip);
+        appendProtocolLine("PLAYERSTATE", detail.str());
+    }
+
     static std::optional<std::int32_t> readLittleLong(
         std::istream& input,
         bool& truncatedField) {
@@ -350,31 +530,51 @@ private:
     }
 
     void addTruncatedDemoWarning(std::string_view detail) {
-        info_.warnings.push_back(
+        const std::string warning =
             "The demo ends with " + std::string(detail) +
-            "; all complete snapshots and events before it were recovered.");
+            "; all complete snapshots and events before it were recovered.";
+        info_.warnings.push_back(warning);
+        appendProtocolLine("WARNING", warning);
     }
 
     void parseMessage(int sequence, const std::vector<std::uint8_t>& bytes) {
+        currentMessageSequence_ = sequence;
+        appendProtocolLine(
+            "MESSAGE",
+            "sequence=" + std::to_string(sequence) + "; payloadBytes=" +
+                std::to_string(bytes.size()));
+        appendRawMessage(bytes);
         MessageReader message(bytes, decoder_);
-        (void)message.readLong(); // reliable acknowledgement
+        const std::int32_t reliableAcknowledgement = message.readLong();
+        appendProtocolLine(
+            "ACK",
+            "reliableAcknowledgement=" + std::to_string(reliableAcknowledgement));
 
         int illegibleCommands = 0;
         while (true) {
             const int command = message.readByte();
             if (command == kSvcEof) {
+                appendProtocolLine("SVC_EOF", "end of decoded message");
                 break;
             }
             switch (command) {
                 case kSvcNop:
+                    appendProtocolLine("SVC_NOP", "no operation");
                     break;
                 case kSvcGamestate:
+                    appendProtocolLine("SVC_GAMESTATE", "begin");
                     parseGameState(message);
                     break;
-                case kSvcServerCommand:
-                    (void)message.readLong();
-                    parseServerCommand(message.readString());
+                case kSvcServerCommand: {
+                    const std::int32_t commandSequence = message.readLong();
+                    const std::string serverCommand = message.readString();
+                    appendProtocolLine(
+                        "SVC_SERVERCOMMAND",
+                        "sequence=" + std::to_string(commandSequence) + "; text=\"" +
+                            escapeProtocolText(serverCommand) + "\"");
+                    parseServerCommand(serverCommand);
                     break;
+                }
                 case kSvcSnapshot:
                     parseSnapshot(sequence, message);
                     break;
@@ -391,16 +591,20 @@ private:
         }
     }
 
-    static void parseDownload(MessageReader& message) {
+    void parseDownload(MessageReader& message) {
         const std::int16_t block = message.readShort();
 
         // ET's WWW redirect message contains a URL followed by its expected
         // size and flags. Downloads are irrelevant to frag indexing, but the
         // complete payload must still be consumed to keep the bitstream aligned.
         if (block == kDownloadTypeWww) {
-            (void)message.readString();
-            (void)message.readLong();
-            (void)message.readLong();
+            const std::string url = message.readString();
+            const std::int32_t expectedSize = message.readLong();
+            const std::int32_t flags = message.readLong();
+            appendProtocolLine(
+                "SVC_DOWNLOAD",
+                "type=WWW; url=\"" + escapeProtocolText(url) + "\"; expectedBytes=" +
+                    std::to_string(expectedSize) + "; flags=" + std::to_string(flags));
             return;
         }
 
@@ -410,15 +614,26 @@ private:
         if (block == 0) {
             const std::int32_t downloadSize = message.readLong();
             if (downloadSize < 0) {
-                (void)message.readString();
+                const std::string error = message.readString();
+                appendProtocolLine(
+                    "SVC_DOWNLOAD",
+                    "block=0; error=\"" + escapeProtocolText(error) + "\"");
                 return;
             }
+            appendProtocolLine(
+                "SVC_DOWNLOAD",
+                "block=0; completeFileBytes=" + std::to_string(downloadSize));
         }
 
         const int chunkSize = message.readShort();
         if (chunkSize < 0) {
             throw std::runtime_error("Invalid download chunk size in demo message");
         }
+        appendProtocolLine(
+            "SVC_DOWNLOAD",
+            "block=" + std::to_string(block) + "; chunkBytes=" +
+                std::to_string(chunkSize) +
+                "; payload is present verbatim in the preceding RAW rows");
         message.skipBytes(chunkSize);
     }
 
@@ -433,11 +648,16 @@ private:
         eventSignatures_.clear();
         bigConfigString_.clear();
         currentMatchPhase_ = MatchPhase::Unknown;
+        currentServerTimeMs_ = -1;
     }
 
     void parseGameState(MessageReader& message) {
         resetGameState();
-        (void)message.readLong(); // server command sequence
+        appendProtocolLine("GAMESTATE", "state reset");
+        const std::int32_t serverCommandSequence = message.readLong();
+        appendProtocolLine(
+            "GAMESTATE",
+            "serverCommandSequence=" + std::to_string(serverCommandSequence));
         while (true) {
             const int command = message.readByte();
             if (command == kSvcEof) {
@@ -457,6 +677,9 @@ private:
                 bool removed = false;
                 baselines_[static_cast<std::size_t>(entityNumber)] =
                     readDeltaEntity(message, EntityState{}, entityNumber, removed);
+                appendEntityState(
+                    removed ? "BASELINE_REMOVED" : "BASELINE",
+                    baselines_[static_cast<std::size_t>(entityNumber)]);
             } else {
                 throw std::runtime_error("Invalid gamestate command: " +
                                          std::to_string(command));
@@ -464,7 +687,11 @@ private:
         }
 
         info_.povClientNum = message.readLong();
-        (void)message.readLong(); // checksum feed
+        const std::int32_t checksumFeed = message.readLong();
+        appendProtocolLine(
+            "GAMESTATE",
+            "povClient=" + std::to_string(info_.povClientNum) +
+                "; checksumFeed=" + std::to_string(checksumFeed) + "; end");
         refreshServerMetadata();
         if (info_.povClientNum >= 0 && info_.povClientNum < kMaxClients &&
             currentPlayerPresent_[static_cast<std::size_t>(info_.povClientNum)]) {
@@ -606,9 +833,10 @@ private:
         Snapshot snapshot;
         snapshot.messageNumber = messageNumber;
         snapshot.serverTime = message.readLong();
+        currentServerTimeMs_ = snapshot.serverTime;
         const int deltaDistance = message.readByte();
         snapshot.deltaNumber = deltaDistance == 0 ? -1 : messageNumber - deltaDistance;
-        (void)message.readByte(); // snap flags
+        const int snapFlags = message.readByte();
 
         const Snapshot* old = nullptr;
         if (snapshot.deltaNumber <= 0) {
@@ -627,13 +855,32 @@ private:
         if (areaMaskLength < 0 || areaMaskLength > 32) {
             throw std::runtime_error("Invalid area mask size");
         }
-        message.skipBytes(areaMaskLength);
+        std::ostringstream areaMask;
+        areaMask << std::uppercase << std::hex << std::setfill('0');
+        for (int index = 0; index < areaMaskLength; ++index) {
+            if (index != 0) areaMask << ' ';
+            areaMask << std::setw(2) << message.readByte();
+        }
+        appendProtocolLine(
+            "SVC_SNAPSHOT",
+            "messageNumber=" + std::to_string(messageNumber) +
+                "; serverTime=" + std::to_string(snapshot.serverTime) +
+                "; deltaDistance=" + std::to_string(deltaDistance) +
+                "; deltaMessage=" + std::to_string(snapshot.deltaNumber) +
+                "; snapFlags=" + std::to_string(snapFlags) +
+                "; valid=" + (snapshot.valid ? std::string("true") : std::string("false")) +
+                "; areaMaskBytes=" + std::to_string(areaMaskLength) +
+                "; areaMaskHex=\"" + areaMask.str() + "\"");
         snapshot.playerState = readDeltaPlayerState(
             message, old != nullptr ? &old->playerState : nullptr);
+        appendPlayerState(snapshot.playerState);
 
         std::vector<EntityState> changedEntities;
         snapshot.entities = parsePacketEntities(message, old, changedEntities);
         if (!snapshot.valid) {
+            appendProtocolLine(
+                "SNAPSHOT_SKIPPED",
+                "delta base was unavailable; decoded data was not indexed");
             return;
         }
 
@@ -642,8 +889,13 @@ private:
         }
         info_.lastServerTimeMs = snapshot.serverTime;
         for (const EntityState& entity : changedEntities) {
+            appendEntityState("ENTITY", entity);
             processEntityEvent(entity, snapshot.serverTime);
         }
+        appendProtocolLine(
+            "SNAPSHOT_COMPLETE",
+            "entities=" + std::to_string(snapshot.entities.size()) +
+                "; changedEntities=" + std::to_string(changedEntities.size()));
         snapshots_[static_cast<std::size_t>(messageNumber & (kPacketBackup - 1))] =
             std::move(snapshot);
     }
@@ -681,6 +933,9 @@ private:
                 ++oldIndex;
                 if (removed) {
                     eventSignatures_.erase(newNumber);
+                    appendProtocolLine(
+                        "ENTITY_REMOVE",
+                        "number=" + std::to_string(newNumber));
                 } else {
                     result.push_back(decoded);
                     changed.push_back(std::move(decoded));
@@ -688,7 +943,11 @@ private:
             } else {
                 EntityState decoded = readDeltaEntity(
                     message, baselines_[static_cast<std::size_t>(newNumber)], newNumber, removed);
-                if (!removed) {
+                if (removed) {
+                    appendProtocolLine(
+                        "ENTITY_REMOVE",
+                        "number=" + std::to_string(newNumber));
+                } else {
                     result.push_back(decoded);
                     changed.push_back(std::move(decoded));
                 }
@@ -708,7 +967,68 @@ private:
         const int event = entityType >= kEtEvents
                               ? entityType - kEtEvents
                               : (entity.values[kEsEvent] & ~kEventBits);
-        if (event != kEvObituary) {
+        if (event != kEvObituary && event != kEvBullet) {
+            return;
+        }
+
+        if (event == kEvBullet) {
+            const int attacker = entity.values[kEsOtherEntityNum];
+            const int target = entity.values[kEsOtherEntityNum2];
+            const int hitType = entity.values[kEsModelIndex];
+            if (attacker < 0 || attacker >= kMaxClients ||
+                target < 0 || target >= kMaxClients ||
+                hitType != kHitHeadshot) {
+                return;
+            }
+
+            const std::string signature = std::to_string(entityType) + ":" +
+                                          std::to_string(entity.values[kEsEvent]) + ":" +
+                                          std::to_string(attacker) + ":" +
+                                          std::to_string(target) + ":" +
+                                          std::to_string(entity.values[kEsWeapon]) + ":" +
+                                          std::to_string(hitType);
+            auto& previousSignature = eventSignatures_[entity.number];
+            if (previousSignature == signature) {
+                return;
+            }
+            previousSignature = signature;
+
+            const Player* attackerPlayer = currentPlayer(attacker);
+            const Player* targetPlayer = currentPlayer(target);
+            HitEvent hit;
+            hit.serverTimeMs = serverTime;
+            hit.demoTimeMs = info_.firstServerTimeMs >= 0
+                                 ? serverTime - info_.firstServerTimeMs
+                                 : 0;
+            hit.attacker = attacker;
+            hit.target = target;
+            hit.weapon = entity.values[kEsWeapon];
+            hit.headshot = true;
+            hit.matchPhase = currentMatchPhase_;
+            hit.attackerSessionId = attackerPlayer != nullptr
+                                        ? attackerPlayer->sessionId
+                                        : -1;
+            hit.targetSessionId = targetPlayer != nullptr
+                                      ? targetPlayer->sessionId
+                                      : -1;
+            hit.attackerName = attackerPlayer != nullptr
+                                   ? attackerPlayer->cleanName
+                                   : "#" + std::to_string(attacker);
+            hit.targetName = targetPlayer != nullptr
+                                 ? targetPlayer->cleanName
+                                 : "#" + std::to_string(target);
+            appendProtocolLine(
+                "HEADSHOT_HIT",
+                "attacker=" + std::to_string(hit.attacker) +
+                    "; attackerSession=" + std::to_string(hit.attackerSessionId) +
+                    "; attackerName=\"" + escapeProtocolText(hit.attackerName) +
+                    "\"; target=" + std::to_string(hit.target) +
+                    "; targetSession=" + std::to_string(hit.targetSessionId) +
+                    "; targetName=\"" + escapeProtocolText(hit.targetName) +
+                    "\"; weapon=" + std::to_string(hit.weapon) + " (" +
+                    weaponName(hit.weapon) + "); phase=" +
+                    matchPhaseName(hit.matchPhase));
+            info_.hits.push_back(std::move(hit));
             return;
         }
 
@@ -731,8 +1051,10 @@ private:
         previousSignature = signature;
 
         if (target < 0 || target >= kMaxClients) {
-            info_.warnings.push_back("Skipped obituary with invalid target " +
-                                     std::to_string(target));
+            const std::string warning =
+                "Skipped obituary with invalid target " + std::to_string(target);
+            info_.warnings.push_back(warning);
+            appendProtocolLine("WARNING", warning);
             return;
         }
 
@@ -768,6 +1090,23 @@ private:
                     std::llround(info_.timeLimitMinutes * 60000.0)) - kill.matchElapsedMs;
             }
         }
+        appendProtocolLine(
+            "OBITUARY",
+            "attacker=" + std::to_string(kill.attacker) + "; attackerSession=" +
+                std::to_string(kill.attackerSessionId) + "; attackerName=\"" +
+                escapeProtocolText(kill.attackerName) + "\"; target=" +
+                std::to_string(kill.target) + "; targetSession=" +
+                std::to_string(kill.targetSessionId) + "; targetName=\"" +
+                escapeProtocolText(kill.targetName) + "\"; weapon=" +
+                std::to_string(kill.weapon) + " (" + weaponName(kill.weapon) +
+                "); meansOfDeath=" + std::to_string(kill.meansOfDeath) + " (" +
+                meansOfDeathName(kill.meansOfDeath) + "); teamKill=" +
+                (kill.teamKill ? std::string("true") : std::string("false")) +
+                "; suicide=" + (kill.suicide ? std::string("true") : std::string("false")) +
+                "; headshotKill=" + (kill.headshot ? std::string("true") : std::string("false")) +
+                "; phase=" + matchPhaseName(kill.matchPhase) +
+                "; matchElapsedMs=" + std::to_string(kill.matchElapsedMs) +
+                "; matchRemainingMs=" + std::to_string(kill.matchRemainingMs));
         info_.kills.push_back(std::move(kill));
     }
 
@@ -822,6 +1161,11 @@ private:
     }
 
     void setConfigString(int index, std::string value) {
+        appendProtocolLine(
+            "CONFIGSTRING",
+            "index=" + std::to_string(index) + "; name=" +
+                configStringLabel(index) + "; value=\"" +
+                escapeProtocolText(value) + "\"");
         configStrings_[static_cast<std::size_t>(index)] = std::move(value);
         if (index == kConfigServerInfo || index == kConfigLevelStartTime) {
             refreshServerMetadata();
@@ -945,6 +1289,7 @@ private:
     }
 
     static const detail::HuffmanDecoder decoder_;
+    DemoParseOptions options_;
     DemoInfo info_;
     std::array<std::string, kMaxConfigStrings> configStrings_{};
     std::array<EntityState, kMaxEntities> baselines_{};
@@ -956,18 +1301,106 @@ private:
     std::unordered_map<int, std::string> eventSignatures_;
     std::string bigConfigString_;
     MatchPhase currentMatchPhase_ = MatchPhase::Unknown;
+    int currentMessageSequence_ = -1;
+    std::int32_t currentServerTimeMs_ = -1;
+    std::size_t protocolLineNumber_ = 0;
 };
 
 const detail::HuffmanDecoder ParserState::decoder_{};
 
+int countHeadshotHitsForRun(
+    const DemoInfo& demo,
+    const FragRun& run,
+    const RunFilter& filter) {
+    if (run.killIndices.empty() || demo.hits.empty()) {
+        return 0;
+    }
+
+    const std::size_t firstKillIndex = run.killIndices.front();
+    if (firstKillIndex >= demo.kills.size()) {
+        return 0;
+    }
+    const KillEvent& firstKill = demo.kills[firstKillIndex];
+
+    // A frag is the first obituary in an action, not necessarily its first
+    // combat event. Include the same five-second lead-in that the user sees
+    // when playing a selected clip. This captures headshots that directly
+    // lead to the first kill instead of starting the counter too late.
+    std::int32_t windowStart = run.startDemoTimeMs > kActionLeadInMs
+                                   ? run.startDemoTimeMs - kActionLeadInMs
+                                   : 0;
+
+    // A previous life can overlap the lead-in. Headshots made before the
+    // selected player died must never be attributed to the new action.
+    for (const KillEvent& kill : demo.kills) {
+        if (kill.demoTimeMs < windowStart) {
+            continue;
+        }
+        if (kill.demoTimeMs >= run.startDemoTimeMs) {
+            break;
+        }
+        if (kill.target == run.attacker &&
+            (run.attackerSessionId < 0 || kill.targetSessionId < 0 ||
+             kill.targetSessionId == run.attackerSessionId)) {
+            windowStart = kill.demoTimeMs + 1;
+        }
+    }
+
+    const auto first = std::lower_bound(
+        demo.hits.begin(),
+        demo.hits.end(),
+        windowStart,
+        [](const HitEvent& hit, std::int32_t time) {
+            return hit.demoTimeMs < time;
+        });
+    int count = 0;
+    for (auto hit = first;
+         hit != demo.hits.end() && hit->demoTimeMs <= run.endDemoTimeMs;
+         ++hit) {
+        if (!hit->headshot || hit->attacker != run.attacker ||
+            (run.attackerSessionId >= 0 &&
+             hit->attackerSessionId != run.attackerSessionId) ||
+            (filter.weapon >= 0 && hit->weapon != filter.weapon) ||
+            (firstKill.matchPhase != MatchPhase::Unknown &&
+             hit->matchPhase != MatchPhase::Unknown &&
+             hit->matchPhase != firstKill.matchPhase)) {
+            continue;
+        }
+
+        // Count headshots only against players who are actually victims of
+        // this action. Hits on an unrelated opponent who survives the action
+        // must not inflate its Headshots value.
+        const bool actionVictim = std::any_of(
+            run.killIndices.begin(),
+            run.killIndices.end(),
+            [&](std::size_t killIndex) {
+                if (killIndex >= demo.kills.size()) {
+                    return false;
+                }
+                const KillEvent& kill = demo.kills[killIndex];
+                return kill.target == hit->target &&
+                       (kill.targetSessionId < 0 || hit->targetSessionId < 0 ||
+                        kill.targetSessionId == hit->targetSessionId);
+            });
+        if (actionVictim) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 void finishRun(
     std::vector<FragRun>& output,
     FragRun& run,
-    int minimumKills) {
-    if (run.killIndices.size() >= static_cast<std::size_t>(minimumKills)) {
+    const DemoInfo& demo,
+    const RunFilter& filter) {
+    run.headshotCount = countHeadshotHitsForRun(demo, run, filter);
+    if (run.killIndices.size() >= static_cast<std::size_t>(filter.minimumKills) &&
+        run.headshotCount >= filter.minimumHeadshots) {
         output.push_back(run);
     }
     run.killIndices.clear();
+    run.headshotCount = 0;
     run.startDemoTimeMs = 0;
     run.endDemoTimeMs = 0;
 }
@@ -1061,7 +1494,7 @@ std::vector<FragRun> findRunsForPlayer(
 
         const MatchPhase groupPhase = demo.kills[groupBegin].matchPhase;
         if (previousObservedPhase.has_value() && *previousObservedPhase != groupPhase) {
-            finishRun(output, current, filter.minimumKills);
+            finishRun(output, current, demo, filter);
             postDeathWindowActive = false;
         }
         previousObservedPhase = groupPhase;
@@ -1071,7 +1504,7 @@ std::vector<FragRun> findRunsForPlayer(
             demo.kills.begin() + static_cast<std::ptrdiff_t>(groupEnd),
             eventAllowed);
         if (firstAllowed == demo.kills.begin() + static_cast<std::ptrdiff_t>(groupEnd)) {
-            finishRun(output, current, filter.minimumKills);
+            finishRun(output, current, demo, filter);
             postDeathWindowActive = false;
             groupBegin = groupEnd;
             continue;
@@ -1080,7 +1513,7 @@ std::vector<FragRun> findRunsForPlayer(
         const std::int32_t groupDemoTimeMs = firstAllowed->demoTimeMs;
         if (postDeathWindowActive &&
             static_cast<std::int64_t>(groupDemoTimeMs) > postDeathDeadlineMs) {
-            finishRun(output, current, filter.minimumKills);
+            finishRun(output, current, demo, filter);
             postDeathWindowActive = false;
         }
 
@@ -1096,7 +1529,7 @@ std::vector<FragRun> findRunsForPlayer(
                            !isPostDeathExplosiveKill(kill);
                 });
             if (directFireKillInSnapshot) {
-                finishRun(output, current, filter.minimumKills);
+                finishRun(output, current, demo, filter);
                 postDeathWindowActive = false;
             }
         }
@@ -1116,7 +1549,7 @@ std::vector<FragRun> findRunsForPlayer(
 
             if (!current.killIndices.empty() && filter.maximumGapMs > 0 &&
                 kill.demoTimeMs - current.endDemoTimeMs > filter.maximumGapMs) {
-                finishRun(output, current, filter.minimumKills);
+                finishRun(output, current, demo, filter);
                 postDeathWindowActive = false;
             }
             if (current.killIndices.empty()) {
@@ -1136,19 +1569,21 @@ std::vector<FragRun> findRunsForPlayer(
                     static_cast<std::int64_t>(groupDemoTimeMs) +
                     filter.postDeathExplosiveWindowMs;
             } else {
-                finishRun(output, current, filter.minimumKills);
+                finishRun(output, current, demo, filter);
                 postDeathWindowActive = false;
             }
         }
         groupBegin = groupEnd;
     }
-    finishRun(output, current, filter.minimumKills);
+    finishRun(output, current, demo, filter);
     return output;
 }
 
 } // namespace
 
-DemoInfo DemoParser::parse(const std::filesystem::path& path) const {
+DemoInfo DemoParser::parse(
+    const std::filesystem::path& path,
+    const DemoParseOptions& options) const {
     std::string extension = path.extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
         return static_cast<char>(std::tolower(value));
@@ -1156,12 +1591,15 @@ DemoInfo DemoParser::parse(const std::filesystem::path& path) const {
     if (extension != ".dm_84") {
         throw std::invalid_argument("Only ET: Legacy .dm_84 demo files are supported");
     }
-    return ParserState(path).run();
+    return ParserState(path, options).run();
 }
 
 std::vector<FragRun> findFragRuns(const DemoInfo& demo, const RunFilter& filter) {
     if (filter.minimumKills < 1) {
         throw std::invalid_argument("minimumKills must be greater than zero");
+    }
+    if (filter.minimumHeadshots < 0) {
+        throw std::invalid_argument("minimumHeadshots cannot be negative");
     }
     std::vector<FragRun> result;
     if (filter.playerClientNum >= 0) {

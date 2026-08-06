@@ -80,8 +80,25 @@ void printJson(const etlfrag::DemoInfo& demo) {
                   << ", \"phase\": \"" << jsonEscape(etlfrag::matchPhaseName(kill.matchPhase)) << "\""
                   << ", \"teamKill\": " << (kill.teamKill ? "true" : "false")
                   << ", \"suicide\": " << (kill.suicide ? "true" : "false")
-                  << ", \"headshot\": " << (kill.headshot ? "true" : "false") << "}"
+                  << ", \"headshotKill\": " << (kill.headshot ? "true" : "false") << "}"
                   << (i + 1 == demo.kills.size() ? "\n" : ",\n");
+    }
+    std::cout << "  ],\n  \"headshotHits\": [\n";
+    for (std::size_t i = 0; i < demo.hits.size(); ++i) {
+        const auto& hit = demo.hits[i];
+        std::cout << "    {\"serverTimeMs\": " << hit.serverTimeMs
+                  << ", \"demoTimeMs\": " << hit.demoTimeMs
+                  << ", \"attacker\": " << hit.attacker
+                  << ", \"attackerSessionId\": " << hit.attackerSessionId
+                  << ", \"attackerName\": \"" << jsonEscape(hit.attackerName)
+                  << "\", \"target\": " << hit.target
+                  << ", \"targetSessionId\": " << hit.targetSessionId
+                  << ", \"targetName\": \"" << jsonEscape(hit.targetName)
+                  << "\", \"weapon\": " << hit.weapon
+                  << ", \"weaponName\": \"" << jsonEscape(etlfrag::weaponName(hit.weapon))
+                  << "\", \"phase\": \"" << jsonEscape(etlfrag::matchPhaseName(hit.matchPhase))
+                  << "\"}"
+                  << (i + 1 == demo.hits.size() ? "\n" : ",\n");
     }
     std::cout << "  ]\n}\n";
 }
@@ -92,7 +109,8 @@ void printText(const etlfrag::DemoInfo& demo) {
               << "POV: " << demo.povName << " (#" << demo.povClientNum << ")\n"
               << "Duration: " << etlfrag::formatDuration(demo.lastServerTimeMs - demo.firstServerTimeMs)
               << "\nPlayers: " << demo.players.size() << "\n"
-              << "Events: " << demo.kills.size() << "\n";
+              << "Events: " << demo.kills.size() << "\n"
+              << "Headshot hits: " << demo.hits.size() << "\n";
     for (const std::string& warning : demo.warnings) {
         std::cout << "Warning: " << warning << "\n";
     }
@@ -104,7 +122,7 @@ void printText(const etlfrag::DemoInfo& demo) {
                   << " " << etlfrag::matchPhaseName(kill.matchPhase)
                   << (kill.teamKill ? " TEAMKILL" : "")
                   << (kill.suicide ? " SELF" : "")
-                  << (kill.headshot ? " HS" : "") << '\n';
+                  << (kill.headshot ? " HEADSHOT KILL" : "") << '\n';
     }
 }
 
@@ -117,13 +135,14 @@ void printRuns(const etlfrag::DemoInfo& demo, const etlfrag::RunFilter& filter) 
         if (first.matchRemainingMs >= 0) {
             std::cout << "clock " << etlfrag::formatDuration(first.matchRemainingMs, false) << "  ";
         }
-        std::cout << run.attackerName << "  " << run.killIndices.size() << " kills  ("
+        std::cout << run.attackerName << "  " << run.killIndices.size() << " kills, "
+                  << run.headshotCount << " headshots  ("
                   << etlfrag::formatDuration(run.endDemoTimeMs - run.startDemoTimeMs) << ")\n";
         for (const std::size_t killIndex : run.killIndices) {
             const auto& kill = demo.kills[killIndex];
             std::cout << "  " << etlfrag::formatDuration(kill.demoTimeMs) << " -> "
                       << kill.targetName << " [" << etlfrag::weaponName(kill.weapon) << "]"
-                      << (kill.headshot ? " HS" : "")
+                      << (kill.headshot ? " HEADSHOT KILL" : "")
                       << (kill.teamKill ? " TEAMKILL" : "") << '\n';
         }
     }
@@ -134,7 +153,7 @@ void printUsage() {
         << "Usage:\n"
         << "  etl-frag-cli <file.dm_84> [--json]\n"
         << "  etl-frag-cli <file.dm_84> --runs [--player ID] [--session ID] [--min N] "
-           "[--gap SECONDS] [--weapon ID] [--teamkills] "
+           "[--min-headshots N] [--gap SECONDS] [--weapon ID] [--teamkills] "
            "[--include-warmup] [--post-death-explosives SECONDS]\n";
 }
 
@@ -210,6 +229,9 @@ int main(int argc, char** argv) {
             } else if (option == "--min") {
                 filter.minimumKills =
                     parseIntegerOption(requireValue(), option, 1, 99);
+            } else if (option == "--min-headshots") {
+                filter.minimumHeadshots =
+                    parseIntegerOption(requireValue(), option, 0, 99);
             } else if (option == "--gap") {
                 filter.maximumGapMs =
                     parseSecondsOption(requireValue(), option, 0.0, 3600.0);

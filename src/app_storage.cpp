@@ -24,7 +24,8 @@ namespace etlfrag {
 namespace {
 
 constexpr std::array<char, 8> kIndexMagic{{'E', 'T', 'L', 'I', 'D', 'X', '1', '3'}};
-constexpr std::array<char, 8> kHighlightMagic{{'E', 'T', 'L', 'H', 'I', 'L', '1', '3'}};
+constexpr std::array<char, 8> kLegacyHighlightMagic{{'E', 'T', 'L', 'H', 'I', 'L', '1', '3'}};
+constexpr std::array<char, 8> kHighlightMagic{{'E', 'T', 'L', 'H', 'I', 'L', '1', '4'}};
 constexpr std::uint32_t kStorageVersion = 1;
 constexpr std::uint32_t kMaximumStringBytes = 16U * 1024U * 1024U;
 constexpr std::uint32_t kMaximumEntries = 250000U;
@@ -308,6 +309,7 @@ bool writeHighlight(std::ostream& stream, const HighlightItem& highlight) {
            writeScalar(stream, highlight.startDemoTimeMs) &&
            writeScalar(stream, highlight.endDemoTimeMs) &&
            writeScalar(stream, highlight.matchRemainingMs) &&
+           writeScalar(stream, highlight.headshotCount) &&
            writeString(stream, highlight.description) &&
            writeVector(stream, highlight.events, writeHighlightEvent);
 }
@@ -323,8 +325,34 @@ bool readHighlight(std::istream& stream, HighlightItem& highlight) {
            readScalar(stream, highlight.startDemoTimeMs) &&
            readScalar(stream, highlight.endDemoTimeMs) &&
            readScalar(stream, highlight.matchRemainingMs) &&
+           readScalar(stream, highlight.headshotCount) &&
            readString(stream, highlight.description) &&
            readVector(stream, highlight.events, readHighlightEvent);
+}
+
+bool readLegacyHighlight(std::istream& stream, HighlightItem& highlight) {
+    std::string path;
+    if (!readString(stream, path)) {
+        return false;
+    }
+    highlight.demoPath = pathFromBytes(path);
+    if (!readString(stream, highlight.mapName) ||
+        !readString(stream, highlight.povName) ||
+        !readScalar(stream, highlight.startDemoTimeMs) ||
+        !readScalar(stream, highlight.endDemoTimeMs) ||
+        !readScalar(stream, highlight.matchRemainingMs) ||
+        !readString(stream, highlight.description) ||
+        !readVector(stream, highlight.events, readHighlightEvent)) {
+        return false;
+    }
+    // Version 1.7.0 only persisted the headshot-kill boolean. Preserve the
+    // best available value for legacy basket rows; newly saved rows carry the
+    // exact aggregate hit count.
+    highlight.headshotCount = static_cast<int>(std::count_if(
+        highlight.events.begin(),
+        highlight.events.end(),
+        [](const HighlightEvent& event) { return event.headshot; }));
+    return true;
 }
 
 bool replaceFile(
@@ -748,6 +776,7 @@ IndexedDemoSummary readSummary(sqlite3_stmt* statement) {
     summary.playerCount = static_cast<std::size_t>(sqlite3_column_int64(statement, 14));
     summary.eventCount = static_cast<std::size_t>(sqlite3_column_int64(statement, 15));
     summary.duplicateCount = static_cast<std::size_t>(sqlite3_column_int64(statement, 16));
+    summary.parserRevision = sqlite3_column_int(statement, 17);
     return summary;
 }
 
@@ -756,7 +785,7 @@ constexpr const char* kSummaryColumns =
     "d.pov_name,d.pov_client_num,d.first_server_time_ms,d.last_server_time_ms,"
     "d.file_size,d.modified_ticks,d.partial_hash,d.player_count,d.event_count,"
     "(SELECT COUNT(*) FROM demos AS duplicate WHERE duplicate.file_size=d.file_size "
-    "AND duplicate.partial_hash=d.partial_hash AND d.partial_hash<>'')";
+    "AND duplicate.partial_hash=d.partial_hash AND d.partial_hash<>''),d.parser_revision";
 
 std::string escapedLikePattern(const std::string& query) {
     std::string pattern = "%";
@@ -823,6 +852,7 @@ bool SqliteDemoIndex::open(const std::filesystem::path& path, std::string& error
         "time_limit_minutes REAL NOT NULL,"
         "player_count INTEGER NOT NULL,"
         "event_count INTEGER NOT NULL,"
+        "parser_revision INTEGER NOT NULL DEFAULT 0,"
         "indexed_unix INTEGER NOT NULL"
         ");"
         "CREATE INDEX IF NOT EXISTS demos_date_idx ON demos(recorded_date);"
@@ -863,14 +893,61 @@ bool SqliteDemoIndex::open(const std::filesystem::path& path, std::string& error
         "PRIMARY KEY(demo_id,ordinal)"
         ");"
         "CREATE INDEX IF NOT EXISTS kills_demo_time_idx ON kills(demo_id,demo_time_ms);"
+        "CREATE TABLE IF NOT EXISTS headshot_hits("
+        "demo_id INTEGER NOT NULL REFERENCES demos(id) ON DELETE CASCADE,"
+        "ordinal INTEGER NOT NULL,"
+        "server_time_ms INTEGER NOT NULL,"
+        "demo_time_ms INTEGER NOT NULL,"
+        "attacker INTEGER NOT NULL,"
+        "target INTEGER NOT NULL,"
+        "attacker_session_id INTEGER NOT NULL,"
+        "target_session_id INTEGER NOT NULL,"
+        "weapon INTEGER NOT NULL,"
+        "match_phase INTEGER NOT NULL,"
+        "attacker_name TEXT NOT NULL,"
+        "target_name TEXT NOT NULL,"
+        "PRIMARY KEY(demo_id,ordinal)"
+        ");"
+        "CREATE INDEX IF NOT EXISTS headshot_hits_demo_time_idx "
+        "ON headshot_hits(demo_id,demo_time_ms);"
         "CREATE TABLE IF NOT EXISTS warnings("
         "demo_id INTEGER NOT NULL REFERENCES demos(id) ON DELETE CASCADE,"
         "ordinal INTEGER NOT NULL,"
         "message TEXT NOT NULL,"
         "PRIMARY KEY(demo_id,ordinal)"
         ");"
-        "PRAGMA user_version=3;";
+        ;
     if (!sqliteExec(database_, schema, error)) {
+        close();
+        return false;
+    }
+
+    // 1.7.0 used this same database path but did not store per-hit data. Add a
+    // parser revision marker in place, preserve the existing index, and make
+    // unchanged legacy rows stale so the next Update index pass reparses them.
+    bool hasParserRevision = false;
+    {
+        SqliteStatement columns(database_, "PRAGMA table_info(demos);", error);
+        if (!columns) {
+            close();
+            return false;
+        }
+        while (sqlite3_step(columns.get()) == SQLITE_ROW) {
+            if (sqliteText(columns.get(), 1) == "parser_revision") {
+                hasParserRevision = true;
+                break;
+            }
+        }
+    }
+    if (!hasParserRevision &&
+        !sqliteExec(
+            database_,
+            "ALTER TABLE demos ADD COLUMN parser_revision INTEGER NOT NULL DEFAULT 0;",
+            error)) {
+        close();
+        return false;
+    }
+    if (!sqliteExec(database_, "PRAGMA user_version=4;", error)) {
         close();
         return false;
     }
@@ -903,13 +980,17 @@ std::optional<DemoInfo> SqliteDemoIndex::findFresh(
     }
     SqliteStatement statement(
         database_,
-        "SELECT id,file_size,modified_ticks,partial_hash FROM demos WHERE path_key=?1;",
+        "SELECT id,file_size,modified_ticks,partial_hash,parser_revision "
+        "FROM demos WHERE path_key=?1;",
         error);
     if (!statement || !bindText(statement.get(), 1, normalizedPathKey(path))) {
         if (error.empty()) error = sqlite3_errmsg(database_);
         return std::nullopt;
     }
     if (sqlite3_step(statement.get()) != SQLITE_ROW) {
+        return std::nullopt;
+    }
+    if (sqlite3_column_int(statement.get(), 4) != kDemoIndexParserRevision) {
         return std::nullopt;
     }
     const std::uint64_t storedSize =
@@ -1022,6 +1103,38 @@ std::optional<DemoInfo> SqliteDemoIndex::loadById(
         return std::nullopt;
     }
 
+    SqliteStatement hitStatement(
+        database_,
+        "SELECT server_time_ms,demo_time_ms,attacker,target,attacker_session_id,"
+        "target_session_id,weapon,match_phase,attacker_name,target_name "
+        "FROM headshot_hits WHERE demo_id=?1 ORDER BY ordinal;",
+        error);
+    if (!hitStatement) return std::nullopt;
+    sqlite3_bind_int64(hitStatement.get(), 1, id);
+    while (sqlite3_step(hitStatement.get()) == SQLITE_ROW) {
+        HitEvent hit;
+        hit.serverTimeMs = sqlite3_column_int(hitStatement.get(), 0);
+        hit.demoTimeMs = sqlite3_column_int(hitStatement.get(), 1);
+        hit.attacker = sqlite3_column_int(hitStatement.get(), 2);
+        hit.target = sqlite3_column_int(hitStatement.get(), 3);
+        hit.attackerSessionId = sqlite3_column_int(hitStatement.get(), 4);
+        hit.targetSessionId = sqlite3_column_int(hitStatement.get(), 5);
+        hit.weapon = sqlite3_column_int(hitStatement.get(), 6);
+        const int phase = sqlite3_column_int(hitStatement.get(), 7);
+        hit.matchPhase = phase >= static_cast<int>(MatchPhase::Unknown) &&
+                                 phase <= static_cast<int>(MatchPhase::Intermission)
+                             ? static_cast<MatchPhase>(phase)
+                             : MatchPhase::Unknown;
+        hit.attackerName = sqliteText(hitStatement.get(), 8);
+        hit.targetName = sqliteText(hitStatement.get(), 9);
+        hit.headshot = true;
+        demo.hits.push_back(std::move(hit));
+    }
+    if (sqlite3_errcode(database_) != SQLITE_OK && sqlite3_errcode(database_) != SQLITE_DONE) {
+        error = sqlite3_errmsg(database_);
+        return std::nullopt;
+    }
+
     SqliteStatement warningStatement(
         database_,
         "SELECT message FROM warnings WHERE demo_id=?1 ORDER BY ordinal;",
@@ -1074,8 +1187,8 @@ bool SqliteDemoIndex::upsert(
         "INSERT INTO demos(path,path_key,file_name,recorded_date,file_size,modified_ticks,"
         "partial_hash,map_name,game_name,mod_version,pov_name,pov_client_num,"
         "first_server_time_ms,last_server_time_ms,level_start_time_ms,time_limit_minutes,"
-        "player_count,event_count,indexed_unix) VALUES("
-        "?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19) "
+        "player_count,event_count,parser_revision,indexed_unix) VALUES("
+        "?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) "
         "ON CONFLICT(path_key) DO UPDATE SET path=excluded.path,file_name=excluded.file_name,"
         "recorded_date=excluded.recorded_date,file_size=excluded.file_size,"
         "modified_ticks=excluded.modified_ticks,partial_hash=excluded.partial_hash,"
@@ -1085,7 +1198,8 @@ bool SqliteDemoIndex::upsert(
         "last_server_time_ms=excluded.last_server_time_ms,"
         "level_start_time_ms=excluded.level_start_time_ms,"
         "time_limit_minutes=excluded.time_limit_minutes,player_count=excluded.player_count,"
-        "event_count=excluded.event_count,indexed_unix=excluded.indexed_unix;",
+        "event_count=excluded.event_count,parser_revision=excluded.parser_revision,"
+        "indexed_unix=excluded.indexed_unix;",
         error);
     if (!demoStatement) {
         rollback();
@@ -1114,7 +1228,8 @@ bool SqliteDemoIndex::upsert(
         sqlite3_bind_double(demoStatement.get(), 16, demo.timeLimitMinutes) == SQLITE_OK &&
         sqlite3_bind_int64(demoStatement.get(), 17, static_cast<sqlite3_int64>(demo.players.size())) == SQLITE_OK &&
         sqlite3_bind_int64(demoStatement.get(), 18, static_cast<sqlite3_int64>(demo.kills.size())) == SQLITE_OK &&
-        sqlite3_bind_int64(demoStatement.get(), 19, static_cast<sqlite3_int64>(now)) == SQLITE_OK;
+        sqlite3_bind_int(demoStatement.get(), 19, kDemoIndexParserRevision) == SQLITE_OK &&
+        sqlite3_bind_int64(demoStatement.get(), 20, static_cast<sqlite3_int64>(now)) == SQLITE_OK;
     if (!bound || !sqliteDone(demoStatement, error)) {
         if (error.empty()) error = sqlite3_errmsg(database_);
         rollback();
@@ -1131,7 +1246,7 @@ bool SqliteDemoIndex::upsert(
     }
     const sqlite3_int64 demoId = sqlite3_column_int64(idStatement.get(), 0);
 
-    for (const char* table : {"players", "kills", "warnings"}) {
+    for (const char* table : {"players", "kills", "headshot_hits", "warnings"}) {
         const std::string sql = std::string("DELETE FROM ") + table + " WHERE demo_id=?1;";
         SqliteStatement deletion(database_, sql.c_str(), error);
         if (!deletion) {
@@ -1210,6 +1325,43 @@ bool SqliteDemoIndex::upsert(
                     sqlite3_bind_int(killInsert.get(), 19, kill.matchElapsedMs) == SQLITE_OK &&
                     sqlite3_bind_int(killInsert.get(), 20, kill.matchRemainingMs) == SQLITE_OK;
         if (!killBound || sqlite3_step(killInsert.get()) != SQLITE_DONE) {
+            error = sqlite3_errmsg(database_);
+            rollback();
+            return false;
+        }
+    }
+
+    SqliteStatement hitInsert(
+        database_,
+        "INSERT INTO headshot_hits(demo_id,ordinal,server_time_ms,demo_time_ms,"
+        "attacker,target,attacker_session_id,target_session_id,weapon,match_phase,"
+        "attacker_name,target_name) "
+        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12);",
+        error);
+    if (!hitInsert) {
+        rollback();
+        return false;
+    }
+    for (std::size_t index = 0; index < demo.hits.size(); ++index) {
+        const HitEvent& hit = demo.hits[index];
+        sqlite3_reset(hitInsert.get());
+        sqlite3_clear_bindings(hitInsert.get());
+        const bool hitBound =
+            sqlite3_bind_int64(hitInsert.get(), 1, demoId) == SQLITE_OK &&
+            sqlite3_bind_int64(
+                hitInsert.get(), 2, static_cast<sqlite3_int64>(index)) == SQLITE_OK &&
+            sqlite3_bind_int(hitInsert.get(), 3, hit.serverTimeMs) == SQLITE_OK &&
+            sqlite3_bind_int(hitInsert.get(), 4, hit.demoTimeMs) == SQLITE_OK &&
+            sqlite3_bind_int(hitInsert.get(), 5, hit.attacker) == SQLITE_OK &&
+            sqlite3_bind_int(hitInsert.get(), 6, hit.target) == SQLITE_OK &&
+            sqlite3_bind_int(hitInsert.get(), 7, hit.attackerSessionId) == SQLITE_OK &&
+            sqlite3_bind_int(hitInsert.get(), 8, hit.targetSessionId) == SQLITE_OK &&
+            sqlite3_bind_int(hitInsert.get(), 9, hit.weapon) == SQLITE_OK &&
+            sqlite3_bind_int(
+                hitInsert.get(), 10, static_cast<int>(hit.matchPhase)) == SQLITE_OK &&
+            bindText(hitInsert.get(), 11, hit.attackerName) &&
+            bindText(hitInsert.get(), 12, hit.targetName);
+        if (!hitBound || sqlite3_step(hitInsert.get()) != SQLITE_DONE) {
             error = sqlite3_errmsg(database_);
             rollback();
             return false;
@@ -1448,9 +1600,15 @@ bool loadHighlights(
         error = "Could not open the highlight basket.";
         return false;
     }
-    if (!readHeader(stream, kHighlightMagic, error)) {
+    std::array<char, 8> magic{};
+    std::uint32_t version = 0;
+    stream.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+    if (!stream || !readScalar(stream, version) || version != kStorageVersion ||
+        (magic != kHighlightMagic && magic != kLegacyHighlightMagic)) {
+        error = "The highlight basket is invalid or belongs to an unsupported version.";
         return false;
     }
+    const bool legacyFormat = magic == kLegacyHighlightMagic;
     std::uint32_t count = 0;
     if (!readScalar(stream, count) || count > kMaximumEntries) {
         error = "The highlight basket contains an invalid item count.";
@@ -1459,7 +1617,8 @@ bool loadHighlights(
     highlights.reserve(count);
     for (std::uint32_t index = 0; index < count; ++index) {
         HighlightItem item;
-        if (!readHighlight(stream, item)) {
+        if (!(legacyFormat ? readLegacyHighlight(stream, item)
+                           : readHighlight(stream, item))) {
             highlights.clear();
             error = "The highlight basket is truncated or corrupted.";
             return false;

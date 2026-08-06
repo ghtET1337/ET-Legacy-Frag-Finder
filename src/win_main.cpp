@@ -38,6 +38,7 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"ETLFragFinderWindow";
 constexpr wchar_t kTimelineClass[] = L"ETLFragFinderTimeline";
+constexpr wchar_t kProtocolInspectorClass[] = L"ETLFragFinderProtocolInspector";
 constexpr wchar_t kApplicationName[] = L"ET: Legacy Frag Finder by ght";
 constexpr int kApplicationIconResource = 101;
 constexpr int kPlaybackPrerollMs = 5000;
@@ -69,8 +70,11 @@ enum ControlId {
     IdTabHighlights,
     IdTabLibrary,
     IdExportCurrent,
+    IdLaunchAsAdministrator,
+    IdLaunchWithoutSeeking,
     IdPlayer,
     IdMinimumKills,
+    IdMinimumHeadshots,
     IdMaximumGap,
     IdWeapon,
     IdTeamKills,
@@ -86,9 +90,11 @@ enum ControlId {
     IdAllEventList,
     IdEventPlayer,
     IdPlayEvent,
+    IdViewProtocolLog,
     IdFolderPath,
     IdChooseFolder,
     IdFolderMinimumKills,
+    IdFolderMinimumHeadshots,
     IdFolderMaximumGap,
     IdFolderWeapon,
     IdFolderTeamKills,
@@ -120,11 +126,13 @@ enum ControlId {
     IdStatus,
     IdPlayerLabel = 2001,
     IdMinimumLabel,
+    IdMinimumHeadshotsLabel,
     IdGapLabel,
     IdWeaponLabel,
     IdPostDeathWindowLabel,
     IdEventPlayerLabel,
     IdFolderMinimumLabel,
+    IdFolderMinimumHeadshotsLabel,
     IdFolderGapLabel,
     IdFolderWeaponLabel,
     IdFolderPostDeathWindowLabel,
@@ -191,6 +199,30 @@ struct FolderWatchRequest {
     HANDLE stopEvent = nullptr;
 };
 
+struct ProtocolInspectorState {
+    HWND window = nullptr;
+    HWND description = nullptr;
+    HWND query = nullptr;
+    HWND findNext = nullptr;
+    HWND saveText = nullptr;
+    HWND text = nullptr;
+    HWND status = nullptr;
+    HFONT uiFont = nullptr;
+    HFONT buttonFont = nullptr;
+    HFONT monoFont = nullptr;
+    HFONT smallFont = nullptr;
+    int dpi = 96;
+    std::filesystem::path demoPath;
+    std::string utf8Text;
+    std::wstring wideText;
+    std::size_t lineCount = 0;
+};
+
+constexpr int kProtocolQueryId = 3001;
+constexpr int kProtocolFindId = 3002;
+constexpr int kProtocolSaveId = 3003;
+constexpr int kProtocolTextId = 3004;
+
 struct AppState {
     HWND window = nullptr;
     HWND openDemo = nullptr;
@@ -201,10 +233,14 @@ struct AppState {
     HWND tabHighlights = nullptr;
     HWND tabLibrary = nullptr;
     HWND exportCurrent = nullptr;
+    HWND launchAsAdministrator = nullptr;
+    HWND launchWithoutSeekingControl = nullptr;
     HWND playerLabel = nullptr;
     HWND player = nullptr;
     HWND minimumLabel = nullptr;
     HWND minimumKills = nullptr;
+    HWND minimumHeadshotsLabel = nullptr;
+    HWND minimumHeadshots = nullptr;
     HWND gapLabel = nullptr;
     HWND maximumGap = nullptr;
     HWND weaponLabel = nullptr;
@@ -224,10 +260,13 @@ struct AppState {
     HWND eventPlayerLabel = nullptr;
     HWND eventPlayer = nullptr;
     HWND playEvent = nullptr;
+    HWND viewProtocolLog = nullptr;
     HWND folderPath = nullptr;
     HWND chooseFolder = nullptr;
     HWND folderMinimumLabel = nullptr;
     HWND folderMinimumKills = nullptr;
+    HWND folderMinimumHeadshotsLabel = nullptr;
+    HWND folderMinimumHeadshots = nullptr;
     HWND folderGapLabel = nullptr;
     HWND folderMaximumGap = nullptr;
     HWND folderWeaponLabel = nullptr;
@@ -276,6 +315,8 @@ struct AppState {
     int dpi = 96;
     int activeTab = 0;
     bool demoLoaded = false;
+    bool launchEtlAsAdministrator = false;
+    bool launchWithoutSeeking = false;
     bool includeTeamKills = false;
     bool includeWarmupKills = false;
     bool postDeathExplosivesEnabled = false;
@@ -331,6 +372,7 @@ struct AppState {
     std::filesystem::path dataFolder;
     std::filesystem::path indexPath;
     std::filesystem::path highlightsPath;
+    HWND protocolInspector = nullptr;
 };
 
 AppState gApp;
@@ -343,6 +385,7 @@ LRESULT CALLBACK listViewSubclass(
     UINT_PTR subclassId,
     DWORD_PTR referenceData);
 LRESULT CALLBACK timelineProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK protocolInspectorProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
 void updateWindowTitle();
 void showTab(int tab);
 void searchLibrary(bool reportStatus);
@@ -556,7 +599,7 @@ std::wstring eventSortText(const etlfrag::KillEvent& kill) {
         text = L"KILL";
     }
     if (kill.headshot) {
-        text += L" HEADSHOT";
+        text += L" HEADSHOT KILL";
     }
     text += L" " + toWide(etlfrag::matchPhaseName(kill.matchPhase));
     return text;
@@ -591,11 +634,12 @@ int compareRunRows(LPARAM leftData, LPARAM rightData, int column) {
                 rightFirst != nullptr ? rightFirst->matchRemainingMs : -1);
         case 2: return compareText(toWide(left.attackerName), toWide(right.attackerName));
         case 3: return compareNumbers(left.killIndices.size(), right.killIndices.size());
-        case 4:
+        case 4: return compareNumbers(left.headshotCount, right.headshotCount);
+        case 5:
             return compareNumbers(
                 left.endDemoTimeMs - left.startDemoTimeMs,
                 right.endDemoTimeMs - right.startDemoTimeMs);
-        case 5: return compareText(describeRun(gApp.demo, left), describeRun(gApp.demo, right));
+        case 6: return compareText(describeRun(gApp.demo, left), describeRun(gApp.demo, right));
         default: return 0;
     }
 }
@@ -666,11 +710,12 @@ int compareFolderRunRows(LPARAM leftData, LPARAM rightData, int column) {
                 leftFirst != nullptr ? leftFirst->matchRemainingMs : -1,
                 rightFirst != nullptr ? rightFirst->matchRemainingMs : -1);
         case 5: return compareNumbers(left.killIndices.size(), right.killIndices.size());
-        case 6:
+        case 6: return compareNumbers(left.headshotCount, right.headshotCount);
+        case 7:
             return compareNumbers(
                 left.endDemoTimeMs - left.startDemoTimeMs,
                 right.endDemoTimeMs - right.startDemoTimeMs);
-        case 7:
+        case 8:
             return compareText(describeKills(leftResult.kills), describeKills(rightResult.kills));
         default: return 0;
     }
@@ -745,11 +790,12 @@ int compareHighlightRows(LPARAM leftData, LPARAM rightData, int column) {
         case 3: return compareNumbers(left.startDemoTimeMs, right.startDemoTimeMs);
         case 4: return compareNumbers(left.matchRemainingMs, right.matchRemainingMs);
         case 5: return compareNumbers(left.events.size(), right.events.size());
-        case 6:
+        case 6: return compareNumbers(left.headshotCount, right.headshotCount);
+        case 7:
             return compareNumbers(
                 left.endDemoTimeMs - left.startDemoTimeMs,
                 right.endDemoTimeMs - right.startDemoTimeMs);
-        case 7: return compareText(toWide(left.description), toWide(right.description));
+        case 8: return compareText(toWide(left.description), toWide(right.description));
         default: return 0;
     }
 }
@@ -801,9 +847,9 @@ ListSortState* sortStateFor(HWND list) {
 }
 
 bool defaultAscendingFor(const ListSortState& state, int column) {
-    return !((state.kind == ListKind::Runs && column == 3) ||
-             (state.kind == ListKind::FolderRuns && column == 5) ||
-             (state.kind == ListKind::Highlights && column == 5) ||
+    return !((state.kind == ListKind::Runs && (column == 3 || column == 4)) ||
+             (state.kind == ListKind::FolderRuns && (column == 5 || column == 6)) ||
+             (state.kind == ListKind::Highlights && (column == 5 || column == 6)) ||
              (state.kind == ListKind::Library &&
               (column == 4 || column == 5 || column == 6 || column == 7)));
 }
@@ -943,6 +989,32 @@ void refreshIndexedDemoCount() {
 bool saveEtlPath() {
     return WritePrivateProfileStringW(
                L"ETLegacy", L"Executable", gApp.etlExecutable.c_str(), gApp.iniPath.c_str()) != FALSE;
+}
+
+bool savePlaybackSettings() {
+    const BOOL administratorSaved = WritePrivateProfileStringW(
+        L"Playback",
+        L"LaunchAsAdministrator",
+        gApp.launchEtlAsAdministrator ? L"1" : L"0",
+        gApp.iniPath.c_str());
+    const BOOL noSeekSaved = WritePrivateProfileStringW(
+        L"Playback",
+        L"LaunchWithoutSeeking",
+        gApp.launchWithoutSeeking ? L"1" : L"0",
+        gApp.iniPath.c_str());
+    return administratorSaved != FALSE && noSeekSaved != FALSE;
+}
+
+void updatePlaybackButtonLabels() {
+    const wchar_t* runLabel =
+        gApp.launchWithoutSeeking ? L"Play selected  (no seek)" : L"Play selected  (−5s)";
+    const wchar_t* eventLabel = gApp.launchWithoutSeeking
+                                    ? L"Play selected event  (no seek)"
+                                    : L"Play selected event  (−5s)";
+    for (HWND control : {gApp.playRun, gApp.playFolderRun, gApp.playHighlight}) {
+        if (control != nullptr) SetWindowTextW(control, runLabel);
+    }
+    if (gApp.playEvent != nullptr) SetWindowTextW(gApp.playEvent, eventLabel);
 }
 
 void findEtlExecutable() {
@@ -1094,6 +1166,458 @@ std::optional<std::filesystem::path> chooseDemoFolder() {
     }
     dialog->Release();
     return folder;
+}
+
+int inspectorScale(const ProtocolInspectorState& state, int value) {
+    return MulDiv(value, state.dpi, 96);
+}
+
+void recreateInspectorFonts(ProtocolInspectorState& state) {
+    for (HFONT font : {state.uiFont, state.buttonFont, state.monoFont, state.smallFont}) {
+        if (font != nullptr) DeleteObject(font);
+    }
+    state.uiFont = CreateFontW(
+        -inspectorScale(state, 15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    state.buttonFont = CreateFontW(
+        -inspectorScale(state, 14), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Semibold");
+    state.monoFont = CreateFontW(
+        -inspectorScale(state, 13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+    state.smallFont = CreateFontW(
+        -inspectorScale(state, 12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    for (HWND control : {state.description, state.query}) {
+        if (control != nullptr) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state.uiFont), TRUE);
+        }
+    }
+    for (HWND control : {state.findNext, state.saveText}) {
+        if (control != nullptr) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(state.buttonFont), TRUE);
+        }
+    }
+    if (state.text != nullptr) {
+        SendMessageW(state.text, WM_SETFONT, reinterpret_cast<WPARAM>(state.monoFont), TRUE);
+    }
+    if (state.status != nullptr) {
+        SendMessageW(state.status, WM_SETFONT, reinterpret_cast<WPARAM>(state.smallFont), TRUE);
+    }
+}
+
+void layoutProtocolInspector(ProtocolInspectorState& state) {
+    RECT client{};
+    GetClientRect(state.window, &client);
+    const int margin = inspectorScale(state, 16);
+    const int gap = inspectorScale(state, 10);
+    const int descriptionHeight = inspectorScale(state, 24);
+    const int controlHeight = inspectorScale(state, 34);
+    const int statusHeight = inspectorScale(state, 25);
+    const int buttonWidth = inspectorScale(state, 120);
+    const int toolbarY = margin + descriptionHeight + inspectorScale(state, 6);
+    MoveWindow(
+        state.description,
+        margin,
+        margin,
+        std::max(1, static_cast<int>(client.right) - margin * 2),
+        descriptionHeight,
+        TRUE);
+    MoveWindow(
+        state.saveText,
+        client.right - margin - buttonWidth,
+        toolbarY,
+        buttonWidth,
+        controlHeight,
+        TRUE);
+    MoveWindow(
+        state.findNext,
+        client.right - margin - buttonWidth * 2 - gap,
+        toolbarY,
+        buttonWidth,
+        controlHeight,
+        TRUE);
+    MoveWindow(
+        state.query,
+        margin,
+        toolbarY,
+        std::max(
+            1,
+            static_cast<int>(client.right) - margin * 2 - buttonWidth * 2 - gap * 2),
+        controlHeight,
+        TRUE);
+    const int textY = toolbarY + controlHeight + gap;
+    MoveWindow(
+        state.text,
+        margin,
+        textY,
+        std::max(1, static_cast<int>(client.right) - margin * 2),
+        std::max(1, static_cast<int>(client.bottom) - textY - statusHeight - gap),
+        TRUE);
+    MoveWindow(
+        state.status,
+        margin,
+        client.bottom - statusHeight,
+        std::max(1, static_cast<int>(client.right) - margin * 2),
+        statusHeight,
+        TRUE);
+}
+
+void updateProtocolInspectorStatus(ProtocolInspectorState& state, const std::wstring& suffix = {}) {
+    std::wostringstream status;
+    status << state.lineCount << L" lines • " << std::fixed << std::setprecision(1)
+           << static_cast<double>(state.utf8Text.size()) / (1024.0 * 1024.0)
+           << L" MiB • decoded protocol + complete raw message hex";
+    if (!suffix.empty()) status << L" • " << suffix;
+    SetWindowTextW(state.status, status.str().c_str());
+}
+
+void findNextProtocolText(ProtocolInspectorState& state) {
+    const int queryLength = GetWindowTextLengthW(state.query);
+    std::wstring query(static_cast<std::size_t>(std::max(0, queryLength)) + 1, L'\0');
+    GetWindowTextW(state.query, query.data(), static_cast<int>(query.size()));
+    query.resize(static_cast<std::size_t>(std::max(0, queryLength)));
+    if (query.empty()) {
+        SetFocus(state.query);
+        updateProtocolInspectorStatus(state, L"enter text to search");
+        return;
+    }
+
+    DWORD selectionStart = 0;
+    DWORD selectionEnd = 0;
+    SendMessageW(
+        state.text,
+        EM_GETSEL,
+        reinterpret_cast<WPARAM>(&selectionStart),
+        reinterpret_cast<LPARAM>(&selectionEnd));
+    const auto equalIgnoringCase = [](wchar_t left, wchar_t right) {
+        return std::towlower(left) == std::towlower(right);
+    };
+    const std::size_t start = std::min<std::size_t>(selectionEnd, state.wideText.size());
+    auto found = std::search(
+        state.wideText.begin() + static_cast<std::ptrdiff_t>(start),
+        state.wideText.end(),
+        query.begin(),
+        query.end(),
+        equalIgnoringCase);
+    bool wrapped = false;
+    if (found == state.wideText.end() && start > 0) {
+        found = std::search(
+            state.wideText.begin(),
+            state.wideText.begin() + static_cast<std::ptrdiff_t>(start),
+            query.begin(),
+            query.end(),
+            equalIgnoringCase);
+        wrapped = found != state.wideText.begin() + static_cast<std::ptrdiff_t>(start);
+    }
+    if (found == state.wideText.end() ||
+        (start > 0 && found == state.wideText.begin() + static_cast<std::ptrdiff_t>(start))) {
+        MessageBeep(MB_ICONINFORMATION);
+        updateProtocolInspectorStatus(state, L"text not found");
+        return;
+    }
+
+    const std::size_t position = static_cast<std::size_t>(found - state.wideText.begin());
+    SendMessageW(
+        state.text,
+        EM_SETSEL,
+        static_cast<WPARAM>(position),
+        static_cast<LPARAM>(position + query.size()));
+    SendMessageW(state.text, EM_SCROLLCARET, 0, 0);
+    SetFocus(state.text);
+    updateProtocolInspectorStatus(
+        state,
+        L"match at character " + std::to_wstring(position) + (wrapped ? L" (wrapped)" : L""));
+}
+
+void saveProtocolInspectorText(ProtocolInspectorState& state) {
+    std::wstring file(32768, L'\0');
+    const std::wstring suggested = state.demoPath.filename().wstring() + L".protocol.txt";
+    std::copy(suggested.begin(), suggested.end(), file.begin());
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = state.window;
+    dialog.lpstrFilter = L"Text log (*.txt)\0*.txt\0All files\0*.*\0\0";
+    dialog.lpstrFile = file.data();
+    dialog.nMaxFile = static_cast<DWORD>(file.size());
+    dialog.lpstrDefExt = L"txt";
+    dialog.lpstrTitle = L"Save full demo protocol log";
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&dialog)) return;
+
+    std::ofstream output(std::filesystem::path(file.c_str()), std::ios::binary | std::ios::trunc);
+    if (!output) {
+        MessageBoxW(
+            state.window,
+            L"The protocol log file could not be created.",
+            L"Save error",
+            MB_OK | MB_ICONERROR);
+        return;
+    }
+    output.write("\xEF\xBB\xBF", 3);
+    output.write(state.utf8Text.data(), static_cast<std::streamsize>(state.utf8Text.size()));
+    if (!output) {
+        MessageBoxW(
+            state.window,
+            L"The protocol log could not be written completely.",
+            L"Save error",
+            MB_OK | MB_ICONERROR);
+        return;
+    }
+    updateProtocolInspectorStatus(state, L"saved to " + std::filesystem::path(file.c_str()).filename().wstring());
+}
+
+LRESULT CALLBACK protocolInspectorProcedure(
+    HWND window,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam) {
+    auto* state = reinterpret_cast<ProtocolInspectorState*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<ProtocolInspectorState*>(create->lpCreateParams);
+        if (state == nullptr) return FALSE;
+        state->window = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+    if (state == nullptr) return DefWindowProcW(window, message, wParam, lParam);
+
+    switch (message) {
+        case WM_CREATE: {
+            state->dpi = dpiForWindow(window);
+            state->description = CreateWindowExW(
+                0,
+                WC_STATICW,
+                L"Chronological protocol inspector — decoded records and every original message byte.",
+                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                0, 0, 10, 10, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+            state->query = CreateWindowExW(
+                0,
+                WC_EDITW,
+                L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | WS_BORDER,
+                0, 0, 10, 10, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kProtocolQueryId)),
+                GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(
+                state->query,
+                EM_SETCUEBANNER,
+                TRUE,
+                reinterpret_cast<LPARAM>(L"Search server commands, configstrings, players, events or raw hex"));
+            state->findNext = CreateWindowExW(
+                0,
+                WC_BUTTONW,
+                L"Find next",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 10, 10, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kProtocolFindId)),
+                GetModuleHandleW(nullptr), nullptr);
+            state->saveText = CreateWindowExW(
+                0,
+                WC_BUTTONW,
+                L"Save text…",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 10, 10, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kProtocolSaveId)),
+                GetModuleHandleW(nullptr), nullptr);
+            state->text = CreateWindowExW(
+                0,
+                WC_EDITW,
+                L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | WS_VSCROLL | WS_HSCROLL |
+                    ES_LEFT | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL |
+                    ES_NOHIDESEL,
+                0, 0, 10, 10, window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kProtocolTextId)),
+                GetModuleHandleW(nullptr), nullptr);
+            state->status = CreateWindowExW(
+                0,
+                WC_STATICW,
+                L"",
+                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                0, 0, 10, 10, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(state->text, EM_SETLIMITTEXT, 0x7ffffffe, 0);
+            SetWindowTheme(state->query, L"DarkMode_CFD", nullptr);
+            SetWindowTheme(state->text, L"DarkMode_CFD", nullptr);
+            SetWindowTheme(state->findNext, L"DarkMode_Explorer", nullptr);
+            SetWindowTheme(state->saveText, L"DarkMode_Explorer", nullptr);
+            recreateInspectorFonts(*state);
+            SetWindowTextW(state->text, state->wideText.c_str());
+            updateProtocolInspectorStatus(*state);
+            layoutProtocolInspector(*state);
+            const BOOL dark = TRUE;
+            if (FAILED(DwmSetWindowAttribute(window, 20, &dark, sizeof(dark)))) {
+                DwmSetWindowAttribute(window, 19, &dark, sizeof(dark));
+            }
+            return 0;
+        }
+        case WM_SIZE:
+            layoutProtocolInspector(*state);
+            return 0;
+        case WM_DPICHANGED: {
+            const int newDpi = HIWORD(wParam);
+            if (newDpi > 0 && newDpi != state->dpi) {
+                state->dpi = newDpi;
+                recreateInspectorFonts(*state);
+            }
+            const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested != nullptr) {
+                SetWindowPos(
+                    window,
+                    nullptr,
+                    suggested->left,
+                    suggested->top,
+                    suggested->right - suggested->left,
+                    suggested->bottom - suggested->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            layoutProtocolInspector(*state);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == kProtocolFindId) {
+                findNextProtocolText(*state);
+                return 0;
+            }
+            if (LOWORD(wParam) == kProtocolSaveId) {
+                saveProtocolInspectorText(*state);
+                return 0;
+            }
+            if (LOWORD(wParam) == kProtocolQueryId && HIWORD(wParam) == EN_UPDATE &&
+                (GetKeyState(VK_RETURN) & 0x8000) != 0) {
+                findNextProtocolText(*state);
+                return 0;
+            }
+            break;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(window, &paint);
+            RECT client{};
+            GetClientRect(window, &client);
+            HBRUSH brush = CreateSolidBrush(kBackground);
+            FillRect(dc, &client, brush);
+            DeleteObject(brush);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC: {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            if (reinterpret_cast<HWND>(lParam) == state->text) {
+                SetTextColor(dc, kText);
+                SetBkColor(dc, kControl);
+                return reinterpret_cast<LRESULT>(gApp.controlBrush);
+            }
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, reinterpret_cast<HWND>(lParam) == state->description ? kText : kMuted);
+            return reinterpret_cast<LRESULT>(gApp.backgroundBrush);
+        }
+        case WM_CTLCOLOREDIT: {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(dc, kText);
+            SetBkColor(dc, kControl);
+            return reinterpret_cast<LRESULT>(gApp.controlBrush);
+        }
+        case WM_DESTROY:
+            if (gApp.protocolInspector == window) gApp.protocolInspector = nullptr;
+            return 0;
+        case WM_NCDESTROY:
+            for (HFONT font : {state->uiFont, state->buttonFont, state->monoFont, state->smallFont}) {
+                if (font != nullptr) DeleteObject(font);
+            }
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            delete state;
+            return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+void openProtocolInspector() {
+    if (!gApp.demoLoaded || !std::filesystem::is_regular_file(gApp.demo.path)) {
+        MessageBoxW(
+            gApp.window,
+            L"Open a valid demo before viewing its full protocol log.",
+            L"No demo loaded",
+            MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (gApp.protocolInspector != nullptr) {
+        DestroyWindow(gApp.protocolInspector);
+        gApp.protocolInspector = nullptr;
+    }
+
+    const HCURSOR previousCursor = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    setStatus(L"Decoding the complete demo protocol and raw message data…");
+    UpdateWindow(gApp.window);
+    try {
+        etlfrag::DemoParseOptions options;
+        options.collectProtocolLog = true;
+        etlfrag::DemoInfo detailed = etlfrag::DemoParser{}.parse(gApp.demo.path, options);
+        auto state = std::make_unique<ProtocolInspectorState>();
+        state->demoPath = gApp.demo.path;
+        state->utf8Text =
+            "ET: Legacy Frag Finder by ght — Full demo protocol inspector\r\n"
+            "File: " + toUtf8(gApp.demo.path.wstring()) + "\r\n"
+            "Map: " + detailed.mapName + " | POV: " + detailed.povName + "\r\n"
+            "The RAW rows are a complete hexadecimal representation of every demo message payload.\r\n"
+            "Decoded rows expose gamestate, configstrings, baselines, server commands, snapshots, "
+            "player state, entity state, downloads and obituary events in file order.\r\n\r\n" +
+            detailed.protocolLog;
+        state->lineCount = static_cast<std::size_t>(
+            std::count(state->utf8Text.begin(), state->utf8Text.end(), '\n'));
+        state->wideText = toWide(state->utf8Text);
+
+        const int dpi = dpiForWindow(gApp.window);
+        RECT workArea{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+        const int width = std::min(
+            MulDiv(1220, dpi, 96),
+            std::max(
+                MulDiv(760, dpi, 96),
+                static_cast<int>(workArea.right - workArea.left)));
+        const int height = std::min(
+            MulDiv(820, dpi, 96),
+            std::max(
+                MulDiv(560, dpi, 96),
+                static_cast<int>(workArea.bottom - workArea.top)));
+        const std::wstring title =
+            L"Full demo protocol — " + gApp.demo.path.filename().wstring();
+        HWND inspector = CreateWindowExW(
+            WS_EX_APPWINDOW,
+            kProtocolInspectorClass,
+            title.c_str(),
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            width,
+            height,
+            gApp.window,
+            nullptr,
+            GetModuleHandleW(nullptr),
+            state.get());
+        if (inspector == nullptr) {
+            throw std::runtime_error("The protocol inspector window could not be created");
+        }
+        state.release();
+        gApp.protocolInspector = inspector;
+        ShowWindow(inspector, SW_SHOW);
+        UpdateWindow(inspector);
+        setStatus(L"Full protocol inspector opened for " + gApp.demo.path.filename().wstring());
+    } catch (const std::exception& error) {
+        MessageBoxW(
+            gApp.window,
+            (L"The full demo protocol could not be decoded.\n\n" + toWide(error.what())).c_str(),
+            L"Protocol inspector error",
+            MB_OK | MB_ICONERROR);
+        setStatus(L"Could not open the full demo protocol inspector.");
+    }
+    SetCursor(previousCursor);
 }
 
 bool hasDemoExtension(const std::filesystem::path& path) {
@@ -1367,7 +1891,7 @@ std::wstring eventType(const etlfrag::KillEvent& kill) {
         type = L"KILL";
     }
     if (kill.headshot) {
-        type += L"  •  HEADSHOT";
+        type += L"  •  HEADSHOT KILL";
     }
     if (kill.matchPhase == etlfrag::MatchPhase::Warmup) {
         type += L"  •  WARMUP";
@@ -1661,8 +2185,13 @@ void populateFolderResults() {
             gApp.folderRunList,
             row,
             6,
+            std::to_wstring(result.run.headshotCount));
+        setListCell(
+            gApp.folderRunList,
+            row,
+            7,
             durationText(result.run.endDemoTimeMs - result.run.startDemoTimeMs));
-        setListCell(gApp.folderRunList, row, 7, describeKills(result.kills));
+        setListCell(gApp.folderRunList, row, 8, describeKills(result.kills));
     }
 
     const bool hasResults = !gApp.folderRows.empty();
@@ -1721,6 +2250,8 @@ bool parseSecondsField(HWND control, double minimum, double maximum, double& val
 
 bool readFilterInputs(bool folder, etlfrag::RunFilter& filter) {
     HWND minimumControl = folder ? gApp.folderMinimumKills : gApp.minimumKills;
+    HWND minimumHeadshotsControl =
+        folder ? gApp.folderMinimumHeadshots : gApp.minimumHeadshots;
     HWND gapControl = folder ? gApp.folderMaximumGap : gApp.maximumGap;
     HWND weaponControl = folder ? gApp.folderWeapon : gApp.weapon;
     HWND postDeathControl = folder ? gApp.folderPostDeathWindow : gApp.postDeathWindow;
@@ -1738,6 +2269,15 @@ bool readFilterInputs(bool folder, etlfrag::RunFilter& filter) {
             L"Invalid minimum kills",
             MB_OK | MB_ICONINFORMATION);
         SetFocus(minimumControl);
+        return false;
+    }
+    if (!parseIntegerField(minimumHeadshotsControl, 0, 99, filter.minimumHeadshots)) {
+        MessageBoxW(
+            gApp.window,
+            L"Minimum headshots must be a whole number from 0 to 99. Use 0 to disable this filter.",
+            L"Invalid minimum headshots",
+            MB_OK | MB_ICONINFORMATION);
+        SetFocus(minimumHeadshotsControl);
         return false;
     }
     double gapSeconds = 0.0;
@@ -1781,6 +2321,20 @@ bool applyFolderFilters(bool reportStatus) {
     if (gApp.folderDemos.empty()) {
         if (reportStatus) {
             setStatus(L"No cached POV demos are available. Scan a folder first.");
+        }
+        return false;
+    }
+    const bool hasCurrentHeadshotIndex = std::any_of(
+        gApp.folderDemos.begin(),
+        gApp.folderDemos.end(),
+        [](const etlfrag::IndexedDemoSummary& summary) {
+            return summary.parserRevision == etlfrag::kDemoIndexParserRevision;
+        });
+    if (!hasCurrentHeadshotIndex) {
+        if (reportStatus) {
+            setStatus(
+                L"This folder was indexed by an older parser. Select Update index once "
+                L"to add exact headshot-hit data.");
         }
         return false;
     }
@@ -1830,7 +2384,10 @@ bool applyFolderFilters(bool reportStatus) {
     try {
         for (const etlfrag::IndexedDemoSummary& summary : gApp.folderDemos) {
             if (searchActive && matchingDemoIds.count(summary.id) == 0) continue;
-            if (summary.povClientNum < 0) continue;
+            if (summary.povClientNum < 0 ||
+                summary.parserRevision != etlfrag::kDemoIndexParserRevision) {
+                continue;
+            }
             ++povDemos;
             std::string loadError;
             std::optional<etlfrag::DemoInfo> demo =
@@ -1892,6 +2449,7 @@ void setFolderScanControlsEnabled(bool enabled) {
     for (HWND control : {
              gApp.chooseFolder,
              gApp.folderMinimumKills,
+             gApp.folderMinimumHeadshots,
              gApp.folderMaximumGap,
              gApp.folderWeapon,
              gApp.folderTeamKills,
@@ -2182,13 +2740,14 @@ void searchRuns() {
             firstKill.matchRemainingMs >= 0 ? durationText(firstKill.matchRemainingMs, false) : L"—");
         setListCell(gApp.runList, row, 2, toWide(run.attackerName));
         setListCell(gApp.runList, row, 3, std::to_wstring(run.killIndices.size()));
+        setListCell(gApp.runList, row, 4, std::to_wstring(run.headshotCount));
         setListCell(
             gApp.runList,
             row,
-            4,
+            5,
             durationText(run.endDemoTimeMs - run.startDemoTimeMs));
 
-        setListCell(gApp.runList, row, 5, describeRun(gApp.demo, run));
+        setListCell(gApp.runList, row, 6, describeRun(gApp.demo, run));
     }
 
     EnableWindow(gApp.playRun, !gApp.runs.empty());
@@ -2294,6 +2853,7 @@ void loadDemo(const std::filesystem::path& path) {
         }
         gApp.demo = std::move(loaded);
         gApp.demoLoaded = true;
+        EnableWindow(gApp.viewProtocolLog, TRUE);
         gApp.timelineHoverMs = -1;
         SetWindowTextW(gApp.demoPath, path.c_str());
         populateFilters();
@@ -2349,31 +2909,106 @@ void playAtPath(
     }
 
     try {
-        const std::int32_t seekMs = std::max<std::int32_t>(0, demoTimeMs - kPlaybackPrerollMs);
+        const bool automaticSeek = !gApp.launchWithoutSeeking;
+        const std::int32_t seekMs = automaticSeek
+                                        ? std::max<std::int32_t>(
+                                              0, demoTimeMs - kPlaybackPrerollMs)
+                                        : 0;
         std::wostringstream seconds;
         seconds.setf(std::ios::fixed);
         seconds.precision(3);
         seconds << static_cast<double>(seekMs) / 1000.0;
-        const std::wstring arguments =
-            L"+demo \"" + std::filesystem::absolute(demoPath).wstring() +
-            L"\" +seek " + seconds.str();
+
+        // ET: Legacy accepts an absolute demo path, but on Windows its demo
+        // loader looks for '/' when it extracts the file name.  Supplying the
+        // generic form keeps the absolute-path and downstream demo-name logic
+        // consistent on every supported ETL release.
+        const std::filesystem::path absoluteDemo =
+            std::filesystem::absolute(demoPath).lexically_normal();
+        const std::wstring engineDemoPath = absoluteDemo.generic_wstring();
+
+        // Do not execute `seek` as the next startup command.  At that point
+        // `demo` has only advanced the client to CA_PRIMED; cgame and the first
+        // active snapshot are not ready yet.  ETL's activeAction is explicitly
+        // run by CL_FirstSnapshot after the demo becomes active, which makes
+        // seeking safe for both current and older ET: Legacy clients.
+        std::wstring arguments;
+        if (automaticSeek && seekMs > 0) {
+            arguments = L"+set activeAction \"seek " + seconds.str() + L"\" ";
+        }
+        arguments += L"+demo \"" + engineDemoPath + L"\"";
+
+        // A shortcut's compatibility flag is not inherited when Frag Finder
+        // starts etl.exe directly. The explicit runas verb asks Windows for
+        // elevation and shows the normal UAC prompt only when the user enabled
+        // the option in the application.
+        const wchar_t* launchVerb =
+            gApp.launchEtlAsAdministrator ? L"runas" : L"open";
+
         const HINSTANCE result = ShellExecuteW(
             gApp.window,
-            L"open",
+            launchVerb,
             gApp.etlExecutable.c_str(),
             arguments.c_str(),
             gApp.etlExecutable.parent_path().c_str(),
             SW_SHOWNORMAL);
-        if (reinterpret_cast<INT_PTR>(result) <= 32) {
-            throw std::runtime_error("ShellExecute failed");
+
+        const INT_PTR shellResult = reinterpret_cast<INT_PTR>(result);
+        try {
+            std::ofstream log(
+                gApp.dataFolder / L"playback-launch.log",
+                std::ios::binary | std::ios::trunc);
+            if (log) {
+                SYSTEMTIME now{};
+                GetLocalTime(&now);
+                log << "ET: Legacy Frag Finder 1.7.2 playback launch\r\n"
+                    << "Time: " << std::setfill('0') << std::setw(4) << now.wYear << '-'
+                    << std::setw(2) << now.wMonth << '-' << std::setw(2) << now.wDay << ' '
+                    << std::setw(2) << now.wHour << ':' << std::setw(2) << now.wMinute << ':'
+                    << std::setw(2) << now.wSecond << "\r\n"
+                    << "Executable: " << toUtf8(gApp.etlExecutable.wstring()) << "\r\n"
+                    << "Working directory: "
+                    << toUtf8(gApp.etlExecutable.parent_path().wstring()) << "\r\n"
+                    << "Demo: " << toUtf8(absoluteDemo.wstring()) << "\r\n"
+                    << "Verb: " << toUtf8(launchVerb) << "\r\n"
+                    << "Administrator requested: "
+                    << (gApp.launchEtlAsAdministrator ? "yes" : "no") << "\r\n"
+                    << "Automatic seek enabled: " << (automaticSeek ? "yes" : "no")
+                    << "\r\n"
+                    << "Requested event time (ms): " << demoTimeMs << "\r\n"
+                    << "Effective seek time (ms): " << seekMs << "\r\n"
+                    << "Arguments: " << toUtf8(arguments) << "\r\n"
+                    << "ShellExecute result: " << shellResult << "\r\n";
+            }
+        } catch (...) {
+            // A diagnostic log must never prevent demo playback.
         }
-        setStatus(
-            L"Playing " + description + L" from " + durationText(seekMs) +
-            L" (5 seconds before the event)");
-    } catch (...) {
+
+        if (shellResult <= 32) {
+            throw std::runtime_error(
+                "ShellExecute failed with code " + std::to_string(shellResult));
+        }
+        if (automaticSeek) {
+            setStatus(
+                L"Playing " + description + L" from " + durationText(seekMs) +
+                L" (5 seconds before the event)" +
+                (gApp.launchEtlAsAdministrator ? L" • administrator requested" : L"") +
+                L" • launch log saved");
+        } else {
+            setStatus(
+                L"Diagnostic playback: " + description +
+                L" launched from the beginning without seeking" +
+                (gApp.launchEtlAsAdministrator ? L" • administrator requested" : L"") +
+                L" • launch log saved");
+        }
+    } catch (const std::exception& error) {
         MessageBoxW(
             gApp.window,
-            L"ET: Legacy could not be started. Check the path to etl.exe.",
+            (L"ET: Legacy could not be started. Check the path to etl.exe.\n\n" +
+             toWide(error.what()) +
+             L"\n\nLaunch details: " +
+             (gApp.dataFolder / L"playback-launch.log").wstring())
+                .c_str(),
             L"Playback error",
             MB_OK | MB_ICONERROR);
     }
@@ -2421,6 +3056,7 @@ etlfrag::HighlightItem makeHighlight(
     highlight.povName = run.attackerName.empty() ? demo.povName : run.attackerName;
     highlight.startDemoTimeMs = run.startDemoTimeMs;
     highlight.endDemoTimeMs = run.endDemoTimeMs;
+    highlight.headshotCount = run.headshotCount;
     highlight.description = toUtf8(describeRun(demo, run));
     if (!run.killIndices.empty() && run.killIndices.front() < demo.kills.size()) {
         highlight.matchRemainingMs = demo.kills[run.killIndices.front()].matchRemainingMs;
@@ -2450,6 +3086,7 @@ etlfrag::HighlightItem makeHighlight(const FolderRunResult& result) {
                             : result.run.attackerName;
     highlight.startDemoTimeMs = result.run.startDemoTimeMs;
     highlight.endDemoTimeMs = result.run.endDemoTimeMs;
+    highlight.headshotCount = result.run.headshotCount;
     highlight.description = toUtf8(describeKills(result.kills));
     if (!result.kills.empty()) {
         highlight.matchRemainingMs = result.kills.front().matchRemainingMs;
@@ -2493,8 +3130,13 @@ void populateHighlightResults() {
             gApp.highlightList,
             row,
             6,
+            std::to_wstring(highlight.headshotCount));
+        setListCell(
+            gApp.highlightList,
+            row,
+            7,
             durationText(highlight.endDemoTimeMs - highlight.startDemoTimeMs));
-        setListCell(gApp.highlightList, row, 7, toWide(highlight.description));
+        setListCell(gApp.highlightList, row, 8, toWide(highlight.description));
     }
     applyListSort(gApp.highlightList, gApp.highlightSort);
     const bool hasHighlights = !gApp.highlights.empty();
@@ -2846,6 +3488,7 @@ void writeRunCsv(
                           ? etlfrag::formatDuration(first->matchRemainingMs, false)
                           : std::string()) << ','
            << run.killIndices.size() << ','
+           << run.headshotCount << ','
            << csvCell(etlfrag::formatDuration(run.endDemoTimeMs - run.startDemoTimeMs)) << ','
            << csvCell(toUtf8(describeRun(demo, run))) << "\r\n";
 }
@@ -2866,6 +3509,7 @@ void writeRunJson(
            << ",\"match_remaining_ms\":"
            << (first != nullptr ? first->matchRemainingMs : -1)
            << ",\"kills\":" << run.killIndices.size()
+           << ",\"headshots\":" << run.headshotCount
            << ",\"duration_ms\":" << run.endDemoTimeMs - run.startDemoTimeMs
            << ",\"events\":[";
     bool firstEvent = true;
@@ -2878,7 +3522,7 @@ void writeRunJson(
                << ",\"victim\":" << jsonString(kill.targetName)
                << ",\"weapon\":" << jsonString(etlfrag::weaponName(kill.weapon))
                << ",\"phase\":" << jsonString(etlfrag::matchPhaseName(kill.matchPhase))
-               << ",\"headshot\":" << (kill.headshot ? "true" : "false")
+               << ",\"headshot_kill\":" << (kill.headshot ? "true" : "false")
                << ",\"teamkill\":" << (kill.teamKill ? "true" : "false") << '}';
     }
     output << "]}";
@@ -2927,7 +3571,7 @@ void exportCurrentView() {
             }
             output << "]}\n";
         } else {
-            output << "Demo file,Map,Recorded POV,Demo time,Match clock,Kills,Duration,Victims and weapons\r\n";
+            output << "Demo file,Map,Recorded POV,Demo time,Match clock,Kills,Headshots,Duration,Victims and weapons\r\n";
             for (const std::size_t index : order) {
                 if (index < gApp.runs.size()) {
                     writeRunCsv(output, gApp.demo, gApp.runs[index], gApp.demo.path);
@@ -2936,7 +3580,7 @@ void exportCurrentView() {
         }
     } else if (gApp.activeTab == 1) {
         if (json) output << "{\"type\":\"events\",\"rows\":[";
-        else output << "Number,Demo file,Map,Demo time,Match clock,Attacker,Victim,Weapon,Phase,Event type\r\n";
+        else output << "Number,Demo file,Map,Demo time,Match clock,Attacker,Victim,Weapon,Headshot kill,Teamkill,Phase,Event type\r\n";
         bool firstExportedEvent = true;
         for (const std::size_t index : listDataInDisplayOrder(gApp.allEventList)) {
             if (index >= gApp.demo.kills.size()) continue;
@@ -2951,6 +3595,8 @@ void exportCurrentView() {
                        << ",\"attacker\":" << jsonString(kill.attackerName)
                        << ",\"victim\":" << jsonString(kill.targetName)
                        << ",\"weapon\":" << jsonString(etlfrag::weaponName(kill.weapon))
+                       << ",\"headshot_kill\":" << (kill.headshot ? "true" : "false")
+                       << ",\"teamkill\":" << (kill.teamKill ? "true" : "false")
                        << ",\"phase\":" << jsonString(etlfrag::matchPhaseName(kill.matchPhase))
                        << ",\"event_type\":" << jsonString(toUtf8(eventType(kill))) << '}';
             } else {
@@ -2962,6 +3608,8 @@ void exportCurrentView() {
                                       : std::string()) << ','
                        << csvCell(kill.attackerName) << ',' << csvCell(kill.targetName) << ','
                        << csvCell(etlfrag::weaponName(kill.weapon)) << ','
+                       << (kill.headshot ? "true" : "false") << ','
+                       << (kill.teamKill ? "true" : "false") << ','
                        << csvCell(etlfrag::matchPhaseName(kill.matchPhase)) << ','
                        << csvCell(toUtf8(eventType(kill))) << "\r\n";
             }
@@ -2970,7 +3618,7 @@ void exportCurrentView() {
         if (json) output << "]}\n";
     } else if (gApp.activeTab == 2) {
         if (json) output << "{\"type\":\"folder_multi_kills\",\"rows\":[";
-        else output << "Demo file,Map,Recorded POV,Demo time,Match clock,Kills,Duration,Victims and weapons\r\n";
+        else output << "Demo file,Map,Recorded POV,Demo time,Match clock,Kills,Headshots,Duration,Victims and weapons\r\n";
         bool firstRow = true;
         for (const std::size_t rowData : listDataInDisplayOrder(gApp.folderRunList)) {
             if (rowData >= gApp.folderRows.size()) continue;
@@ -2989,7 +3637,7 @@ void exportCurrentView() {
         if (json) output << "]}\n";
     } else if (gApp.activeTab == 3) {
         if (json) output << "{\"type\":\"highlight_basket\",\"rows\":[";
-        else output << "Demo file,Map,Recorded POV,Demo time,Match clock,Kills,Duration,Victims and weapons\r\n";
+        else output << "Demo file,Map,Recorded POV,Demo time,Match clock,Kills,Headshots,Duration,Victims and weapons\r\n";
         bool firstRow = true;
         for (const std::size_t index : listDataInDisplayOrder(gApp.highlightList)) {
             if (index >= gApp.highlights.size()) continue;
@@ -3002,6 +3650,7 @@ void exportCurrentView() {
                        << ",\"demo_time_ms\":" << highlight.startDemoTimeMs
                        << ",\"match_remaining_ms\":" << highlight.matchRemainingMs
                        << ",\"kills\":" << highlight.events.size()
+                       << ",\"headshots\":" << highlight.headshotCount
                        << ",\"duration_ms\":"
                        << highlight.endDemoTimeMs - highlight.startDemoTimeMs
                        << ",\"description\":" << jsonString(highlight.description)
@@ -3012,7 +3661,7 @@ void exportCurrentView() {
                     output << "{\"demo_time_ms\":" << event.demoTimeMs
                            << ",\"victim\":" << jsonString(event.victim)
                            << ",\"weapon\":" << jsonString(event.weapon)
-                           << ",\"headshot\":" << (event.headshot ? "true" : "false")
+                           << ",\"headshot_kill\":" << (event.headshot ? "true" : "false")
                            << ",\"teamkill\":" << (event.teamKill ? "true" : "false") << '}';
                 }
                 output << "]}";
@@ -3024,6 +3673,7 @@ void exportCurrentView() {
                                       ? etlfrag::formatDuration(highlight.matchRemainingMs, false)
                                       : std::string()) << ','
                        << highlight.events.size() << ','
+                       << highlight.headshotCount << ','
                        << csvCell(etlfrag::formatDuration(
                               highlight.endDemoTimeMs - highlight.startDemoTimeMs)) << ','
                        << csvCell(highlight.description) << "\r\n";
@@ -3096,6 +3746,8 @@ void showTab(int tab) {
              gApp.player,
              gApp.minimumLabel,
              gApp.minimumKills,
+             gApp.minimumHeadshotsLabel,
+             gApp.minimumHeadshots,
              gApp.gapLabel,
              gApp.maximumGap,
              gApp.weaponLabel,
@@ -3117,11 +3769,14 @@ void showTab(int tab) {
     setVisible(gApp.eventPlayerLabel, events);
     setVisible(gApp.eventPlayer, events);
     setVisible(gApp.playEvent, events);
+    setVisible(gApp.viewProtocolLog, events);
     for (HWND control : {
              gApp.folderPath,
              gApp.chooseFolder,
              gApp.folderMinimumLabel,
              gApp.folderMinimumKills,
+             gApp.folderMinimumHeadshotsLabel,
+             gApp.folderMinimumHeadshots,
              gApp.folderGapLabel,
              gApp.folderMaximumGap,
              gApp.folderWeaponLabel,
@@ -3847,7 +4502,7 @@ void paintWindow(HDC target) {
 
     if (gApp.activeTab == 1) {
         RECT eventTitle{
-            margin + scale(395),
+            margin + scale(630),
             contentTop + scale(16),
             client.right - scale(270),
             contentTop + scale(41)};
@@ -3887,7 +4542,8 @@ void drawOwnerButton(const DRAWITEMSTRUCT& item) {
     if (id == IdTeamKills || id == IdFolderTeamKills ||
         id == IdWarmupKills || id == IdFolderWarmupKills ||
         id == IdPostDeathExplosives || id == IdFolderPostDeathExplosives ||
-        id == IdFolderWatch || id == IdLibraryScope || id == IdLibraryDuplicates) {
+        id == IdFolderWatch || id == IdLibraryScope || id == IdLibraryDuplicates ||
+        id == IdLaunchAsAdministrator || id == IdLaunchWithoutSeeking) {
         bool checked = false;
         const wchar_t* label = L"";
         if (id == IdTeamKills) {
@@ -3914,9 +4570,15 @@ void drawOwnerButton(const DRAWITEMSTRUCT& item) {
         } else if (id == IdLibraryScope) {
             checked = gApp.libraryFolderOnly;
             label = L"Selected folder only";
-        } else {
+        } else if (id == IdLibraryDuplicates) {
             checked = gApp.libraryDuplicatesOnly;
             label = L"Duplicates only";
+        } else if (id == IdLaunchAsAdministrator) {
+            checked = gApp.launchEtlAsAdministrator;
+            label = L"Launch ETL as administrator";
+        } else {
+            checked = gApp.launchWithoutSeeking;
+            label = L"Launch without seeking";
         }
         fillSolidRect(item.hDC, item.rcItem, kPanel);
         const int boxSize = scale(16);
@@ -4134,9 +4796,11 @@ void recreateDpiResources() {
             applyBaseFont,
             reinterpret_cast<LPARAM>(gApp.font));
         for (HWND control : {
-                 gApp.playerLabel, gApp.minimumLabel, gApp.gapLabel, gApp.weaponLabel,
+                 gApp.playerLabel, gApp.minimumLabel, gApp.minimumHeadshotsLabel,
+                 gApp.gapLabel, gApp.weaponLabel,
                  gApp.postDeathWindowLabel, gApp.eventPlayerLabel,
-                 gApp.folderMinimumLabel, gApp.folderGapLabel, gApp.folderWeaponLabel,
+                 gApp.folderMinimumLabel, gApp.folderMinimumHeadshotsLabel,
+                 gApp.folderGapLabel, gApp.folderWeaponLabel,
                  gApp.folderPostDeathWindowLabel, gApp.folderQueryLabel,
                  gApp.folderFieldLabel, gApp.libraryQueryLabel, gApp.libraryFieldLabel,
                  gApp.status}) {
@@ -4146,6 +4810,7 @@ void recreateDpiResources() {
                  gApp.openDemo, gApp.tabMultiKills, gApp.tabAllEvents, gApp.tabFolderScan,
                  gApp.tabHighlights, gApp.tabLibrary, gApp.exportCurrent, gApp.search,
                  gApp.chooseEtl, gApp.playRun, gApp.addRunHighlight, gApp.playEvent,
+                 gApp.viewProtocolLog,
                  gApp.chooseFolder, gApp.folderApplyFilters, gApp.folderScan,
                  gApp.playFolderRun, gApp.addFolderHighlight, gApp.playHighlight,
                  gApp.removeHighlight, gApp.clearHighlights, gApp.librarySearch,
@@ -4176,12 +4841,12 @@ void rescaleFixedListColumns() {
             ListView_SetColumnWidth(list, column++, scale(value));
         }
     };
-    widths(gApp.runList, {95, 90, 165, 65, 85, 620});
+    widths(gApp.runList, {95, 90, 165, 65, 90, 85, 620});
     widths(gApp.runKillList, {105, 100, 190, 190, 220});
     widths(gApp.allEventList, {55, 100, 100, 180, 180, 185, 230});
-    widths(gApp.folderRunList, {230, 110, 140, 90, 85, 55, 75, 500});
+    widths(gApp.folderRunList, {230, 110, 140, 90, 85, 55, 90, 75, 500});
     widths(gApp.folderKillList, {105, 100, 190, 190, 220});
-    widths(gApp.highlightList, {240, 110, 145, 95, 90, 60, 80, 500});
+    widths(gApp.highlightList, {240, 110, 145, 95, 90, 60, 90, 80, 500});
     widths(gApp.libraryList, {260, 105, 125, 165, 70, 70, 95, 90, 450});
 }
 
@@ -4195,6 +4860,21 @@ void layoutAllControls(int width, int height) {
     const int fileHeight = scale(38);
     const int openWidth = scale(150);
     const int statusHeight = scale(28);
+
+    MoveWindow(
+        gApp.launchAsAdministrator,
+        width - margin - scale(245),
+        scale(6),
+        scale(235),
+        scale(27),
+        TRUE);
+    MoveWindow(
+        gApp.launchWithoutSeekingControl,
+        width - margin - scale(245),
+        scale(35),
+        scale(235),
+        scale(27),
+        TRUE);
 
     MoveWindow(gApp.demoPath, margin, fileY, width - margin * 2 - openWidth - gap, fileHeight, TRUE);
     MoveWindow(gApp.openDemo, width - margin - openWidth, fileY, openWidth, fileHeight, TRUE);
@@ -4269,6 +4949,20 @@ void layoutAllControls(int width, int height) {
         scale(92),
         scale(180),
         TRUE);
+    MoveWindow(
+        gApp.minimumHeadshotsLabel,
+        postDeathX + scale(430),
+        actionY + scale(8),
+        scale(118),
+        scale(18),
+        TRUE);
+    MoveWindow(
+        gApp.minimumHeadshots,
+        postDeathX + scale(556),
+        actionY + scale(1),
+        scale(58),
+        scale(32),
+        TRUE);
 
     const int listsY = contentTop + scale(198);
     const int bottom = height - statusHeight - scale(14);
@@ -4287,8 +4981,8 @@ void layoutAllControls(int width, int height) {
         TRUE);
     ListView_SetColumnWidth(
         gApp.runList,
-        5,
-        std::max(scale(320), width - scale(585)));
+        6,
+        std::max(scale(320), width - scale(675)));
     ListView_SetColumnWidth(
         gApp.runKillList,
         4,
@@ -4314,6 +5008,13 @@ void layoutAllControls(int width, int height) {
         width - margin - scale(245),
         eventActionY,
         scale(230),
+        scale(34),
+        TRUE);
+    MoveWindow(
+        gApp.viewProtocolLog,
+        margin + scale(395),
+        eventActionY,
+        scale(220),
         scale(34),
         TRUE);
     MoveWindow(
@@ -4438,6 +5139,20 @@ void layoutAllControls(int width, int height) {
         scale(92),
         scale(180),
         TRUE);
+    MoveWindow(
+        gApp.folderMinimumHeadshotsLabel,
+        folderPostDeathX + scale(435),
+        actionY + scale(8),
+        scale(118),
+        scale(18),
+        TRUE);
+    MoveWindow(
+        gApp.folderMinimumHeadshots,
+        folderPostDeathX + scale(561),
+        actionY + scale(1),
+        scale(58),
+        scale(32),
+        TRUE);
     const int folderSearchX = margin + scale(14);
     const int folderSearchLabelY = contentTop + scale(126);
     const int folderSearchInputY = contentTop + scale(148);
@@ -4498,8 +5213,8 @@ void layoutAllControls(int width, int height) {
         TRUE);
     ListView_SetColumnWidth(
         gApp.folderRunList,
-        7,
-        std::max(scale(230), width - scale(870)));
+        8,
+        std::max(scale(230), width - scale(960)));
     ListView_SetColumnWidth(
         gApp.folderKillList,
         4,
@@ -4536,8 +5251,8 @@ void layoutAllControls(int width, int height) {
         TRUE);
     ListView_SetColumnWidth(
         gApp.highlightList,
-        7,
-        std::max(scale(240), width - scale(850)));
+        8,
+        std::max(scale(240), width - scale(940)));
 
     const int libraryQueryX = margin + scale(14);
     MoveWindow(gApp.libraryQueryLabel, libraryQueryX, labelY, scale(160), scale(18), TRUE);
@@ -4674,12 +5389,32 @@ void createInterface(HWND window) {
         BS_OWNERDRAW | WS_TABSTOP,
         IdExportCurrent,
         gApp.labelFont);
+    gApp.launchAsAdministrator = createControl(
+        0,
+        WC_BUTTONW,
+        L"Launch ETL as administrator",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdLaunchAsAdministrator);
+    gApp.launchWithoutSeekingControl = createControl(
+        0,
+        WC_BUTTONW,
+        L"Launch without seeking",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdLaunchWithoutSeeking);
 
     gApp.playerLabel = createControl(0, WC_STATICW, L"Player", SS_LEFT, IdPlayerLabel, gApp.smallFont);
     gApp.player = createControl(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IdPlayer);
     gApp.minimumLabel = createControl(0, WC_STATICW, L"Minimum kills", SS_LEFT, IdMinimumLabel, gApp.smallFont);
     gApp.minimumKills = createControl(
         0, WC_EDITW, L"2", ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL | WS_BORDER, IdMinimumKills);
+    gApp.minimumHeadshotsLabel = createControl(
+        0, WC_STATICW, L"Minimum headshots", SS_LEFT, IdMinimumHeadshotsLabel, gApp.smallFont);
+    gApp.minimumHeadshots = createControl(
+        0,
+        WC_EDITW,
+        L"0",
+        ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL | WS_BORDER,
+        IdMinimumHeadshots);
     gApp.gapLabel = createControl(0, WC_STATICW, L"Max. gap (seconds)", SS_LEFT, IdGapLabel, gApp.smallFont);
     gApp.maximumGap = createControl(
         0, WC_EDITW, L"8.0", ES_CENTER | ES_AUTOHSCROLL | WS_BORDER, IdMaximumGap);
@@ -4735,8 +5470,9 @@ void createInterface(HWND window) {
     addListColumn(gApp.runList, 1, 90, L"Match clock");
     addListColumn(gApp.runList, 2, 165, L"Player");
     addListColumn(gApp.runList, 3, 65, L"Kills");
-    addListColumn(gApp.runList, 4, 85, L"Duration");
-    addListColumn(gApp.runList, 5, 620, L"Victims and weapons");
+    addListColumn(gApp.runList, 4, 90, L"Headshots");
+    addListColumn(gApp.runList, 5, 85, L"Duration");
+    addListColumn(gApp.runList, 6, 620, L"Victims and weapons");
 
     gApp.runKillList = createControl(0, WC_LISTVIEWW, L"", listStyle, IdRunKillList);
     configureListView(gApp.runKillList);
@@ -4762,6 +5498,14 @@ void createInterface(HWND window) {
     gApp.playEvent = createControl(
         0, WC_BUTTONW, L"Play selected event  (−5s)", BS_OWNERDRAW | WS_TABSTOP, IdPlayEvent, gApp.labelFont);
     EnableWindow(gApp.playEvent, FALSE);
+    gApp.viewProtocolLog = createControl(
+        0,
+        WC_BUTTONW,
+        L"View full demo protocol",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdViewProtocolLog,
+        gApp.labelFont);
+    EnableWindow(gApp.viewProtocolLog, FALSE);
     gApp.allEventList = createControl(0, WC_LISTVIEWW, L"", listStyle, IdAllEventList);
     configureListView(gApp.allEventList);
     addListColumn(gApp.allEventList, 0, 55, L"#");
@@ -4785,6 +5529,19 @@ void createInterface(HWND window) {
         L"2",
         ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL | WS_BORDER,
         IdFolderMinimumKills);
+    gApp.folderMinimumHeadshotsLabel = createControl(
+        0,
+        WC_STATICW,
+        L"Minimum headshots",
+        SS_LEFT,
+        IdFolderMinimumHeadshotsLabel,
+        gApp.smallFont);
+    gApp.folderMinimumHeadshots = createControl(
+        0,
+        WC_EDITW,
+        L"0",
+        ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL | WS_BORDER,
+        IdFolderMinimumHeadshots);
     gApp.folderGapLabel = createControl(
         0,
         WC_STATICW,
@@ -4920,8 +5677,9 @@ void createInterface(HWND window) {
     addListColumn(gApp.folderRunList, 3, 90, L"Demo time");
     addListColumn(gApp.folderRunList, 4, 85, L"Match clock");
     addListColumn(gApp.folderRunList, 5, 55, L"Kills");
-    addListColumn(gApp.folderRunList, 6, 75, L"Duration");
-    addListColumn(gApp.folderRunList, 7, 500, L"Victims and weapons");
+    addListColumn(gApp.folderRunList, 6, 90, L"Headshots");
+    addListColumn(gApp.folderRunList, 7, 75, L"Duration");
+    addListColumn(gApp.folderRunList, 8, 500, L"Victims and weapons");
 
     gApp.folderKillList = createControl(0, WC_LISTVIEWW, L"", listStyle, IdFolderKillList);
     configureListView(gApp.folderKillList);
@@ -4967,8 +5725,9 @@ void createInterface(HWND window) {
     addListColumn(gApp.highlightList, 3, 95, L"Demo time");
     addListColumn(gApp.highlightList, 4, 90, L"Match clock");
     addListColumn(gApp.highlightList, 5, 60, L"Kills");
-    addListColumn(gApp.highlightList, 6, 80, L"Duration");
-    addListColumn(gApp.highlightList, 7, 500, L"Victims and weapons");
+    addListColumn(gApp.highlightList, 6, 90, L"Headshots");
+    addListColumn(gApp.highlightList, 7, 80, L"Duration");
+    addListColumn(gApp.highlightList, 8, 500, L"Victims and weapons");
     EnableWindow(gApp.playHighlight, FALSE);
     EnableWindow(gApp.removeHighlight, FALSE);
     EnableWindow(gApp.clearHighlights, FALSE);
@@ -5049,10 +5808,12 @@ void createInterface(HWND window) {
              gApp.player,
              gApp.eventPlayer,
              gApp.minimumKills,
+             gApp.minimumHeadshots,
              gApp.maximumGap,
              gApp.weapon,
              gApp.postDeathWindow,
              gApp.folderMinimumKills,
+             gApp.folderMinimumHeadshots,
              gApp.folderMaximumGap,
              gApp.folderWeapon,
              gApp.folderPostDeathWindow,
@@ -5064,6 +5825,12 @@ void createInterface(HWND window) {
     }
     DragAcceptFiles(window, TRUE);
     initializePersistentStorage();
+    gApp.launchEtlAsAdministrator =
+        GetPrivateProfileIntW(
+            L"Playback", L"LaunchAsAdministrator", 0, gApp.iniPath.c_str()) != 0;
+    gApp.launchWithoutSeeking =
+        GetPrivateProfileIntW(
+            L"Playback", L"LaunchWithoutSeeking", 0, gApp.iniPath.c_str()) != 0;
     gApp.folderWatchEnabled =
         GetPrivateProfileIntW(L"Folder", L"AutoIndex", 1, gApp.iniPath.c_str()) != 0;
     findEtlExecutable();
@@ -5071,6 +5838,7 @@ void createInterface(HWND window) {
     populatePostDeathWindows(gApp.postDeathWindow);
     populatePostDeathWindows(gApp.folderPostDeathWindow);
     populateHighlightResults();
+    updatePlaybackButtonLabels();
     searchLibrary(false);
     std::wstring savedFolder(32768, L'\0');
     const DWORD savedFolderLength = GetPrivateProfileStringW(
@@ -5229,6 +5997,37 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 case IdExportCurrent:
                     exportCurrentView();
                     return 0;
+                case IdLaunchAsAdministrator:
+                    gApp.launchEtlAsAdministrator = !gApp.launchEtlAsAdministrator;
+                    InvalidateRect(gApp.launchAsAdministrator, nullptr, TRUE);
+                    if (!savePlaybackSettings()) {
+                        MessageBoxW(
+                            gApp.window,
+                            L"The playback preference could not be saved.",
+                            L"Settings warning",
+                            MB_OK | MB_ICONWARNING);
+                    }
+                    setStatus(
+                        gApp.launchEtlAsAdministrator
+                            ? L"ET: Legacy will request administrator privileges through Windows UAC when playback starts."
+                            : L"ET: Legacy will use normal user privileges when playback starts.");
+                    return 0;
+                case IdLaunchWithoutSeeking:
+                    gApp.launchWithoutSeeking = !gApp.launchWithoutSeeking;
+                    InvalidateRect(gApp.launchWithoutSeekingControl, nullptr, TRUE);
+                    updatePlaybackButtonLabels();
+                    if (!savePlaybackSettings()) {
+                        MessageBoxW(
+                            gApp.window,
+                            L"The playback preference could not be saved.",
+                            L"Settings warning",
+                            MB_OK | MB_ICONWARNING);
+                    }
+                    setStatus(
+                        gApp.launchWithoutSeeking
+                            ? L"Diagnostic playback enabled — demos will start from the beginning without an automatic seek."
+                            : L"Automatic playback seek restored — selected actions start five seconds early.");
+                    return 0;
                 case IdEventPlayer:
                     if (HIWORD(wParam) == CBN_SELCHANGE && gApp.demoLoaded) {
                         populateAllEvents();
@@ -5339,6 +6138,9 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 case IdPlayEvent:
                     playSelectedEvent();
                     return 0;
+                case IdViewProtocolLog:
+                    openProtocolInspector();
+                    return 0;
                 case IdPlayFolderRun:
                     playSelectedFolderRun();
                     return 0;
@@ -5375,7 +6177,8 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 const int id = LOWORD(wParam);
                 const int notification = HIWORD(wParam);
                 const bool filterChanged =
-                    ((id == IdFolderMinimumKills || id == IdFolderMaximumGap) &&
+                    ((id == IdFolderMinimumKills || id == IdFolderMinimumHeadshots ||
+                      id == IdFolderMaximumGap) &&
                      notification == EN_CHANGE) ||
                     (id == IdFolderQuery && notification == EN_CHANGE) ||
                     (id == IdFolderWeapon && notification == CBN_SELCHANGE) ||
@@ -5512,6 +6315,10 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             return 0;
         }
         case WM_DESTROY:
+            if (gApp.protocolInspector != nullptr) {
+                DestroyWindow(gApp.protocolInspector);
+                gApp.protocolInspector = nullptr;
+            }
             stopFolderWatcher();
             if (gApp.folderCancelRequested != nullptr) {
                 gApp.folderCancelRequested->store(true);
@@ -5557,6 +6364,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     controls.dwSize = sizeof(controls);
     controls.dwICC = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&controls);
+
+    WNDCLASSEXW inspectorClass{};
+    inspectorClass.cbSize = sizeof(inspectorClass);
+    inspectorClass.style = CS_HREDRAW | CS_VREDRAW;
+    inspectorClass.lpfnWndProc = protocolInspectorProcedure;
+    inspectorClass.hInstance = instance;
+    inspectorClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    inspectorClass.hIcon = LoadIconW(
+        instance,
+        MAKEINTRESOURCEW(kApplicationIconResource));
+    if (inspectorClass.hIcon == nullptr) {
+        inspectorClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
+    inspectorClass.hIconSm = inspectorClass.hIcon;
+    inspectorClass.hbrBackground = nullptr;
+    inspectorClass.lpszClassName = kProtocolInspectorClass;
+    if (!RegisterClassExW(&inspectorClass)) {
+        if (SUCCEEDED(comInitialization)) CoUninitialize();
+        return 1;
+    }
 
     WNDCLASSEXW timelineClass{};
     timelineClass.cbSize = sizeof(timelineClass);

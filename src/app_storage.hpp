@@ -14,6 +14,8 @@ struct sqlite3;
 
 namespace etlfrag {
 
+inline constexpr int kDemoIndexParserRevision = 4;
+
 struct DemoFileFingerprint {
     std::uint64_t size = 0;
     std::int64_t modifiedTicks = 0;
@@ -66,6 +68,7 @@ struct IndexedDemoSummary {
     std::size_t playerCount = 0;
     std::size_t eventCount = 0;
     std::size_t duplicateCount = 1;
+    int parserRevision = 0;
 };
 
 // SQLite-backed persistent index. Demo payloads stay on disk and are loaded
@@ -121,7 +124,7 @@ struct HighlightEvent {
     std::int32_t demoTimeMs = 0;
     std::string victim;
     std::string weapon;
-    bool headshot = false;
+    bool headshot = false; // Headshot killing blow, not aggregate hit count.
     bool teamKill = false;
 };
 
@@ -132,6 +135,9 @@ struct HighlightItem {
     std::int32_t startDemoTimeMs = 0;
     std::int32_t endDemoTimeMs = 0;
     std::int32_t matchRemainingMs = -1;
+    // Aggregate confirmed headshot hits in the action. HighlightEvent::headshot
+    // remains the obituary flag for the individual killing blow.
+    int headshotCount = 0;
     std::string description;
     std::vector<HighlightEvent> events;
 };

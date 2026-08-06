@@ -38,12 +38,31 @@ struct KillEvent {
     int meansOfDeath = 0;
     bool teamKill = false;
     bool suicide = false;
+    // True only when this obituary's killing blow was a headshot. Aggregate
+    // action headshots are counted from DemoInfo::hits instead.
     bool headshot = false;
     MatchPhase matchPhase = MatchPhase::Unknown;
     std::string attackerName;
     std::string targetName;
     std::int32_t matchElapsedMs = -1;
     std::int32_t matchRemainingMs = -1;
+};
+
+// One confirmed bullet hit reported by the game protocol. Unlike the
+// headshot flag carried by EV_OBITUARY (which only describes the killing
+// blow), EV_BULLET/modelindex=HIT_HEADSHOT is emitted for every headshot.
+struct HitEvent {
+    std::int32_t serverTimeMs = 0;
+    std::int32_t demoTimeMs = 0;
+    int attacker = -1;
+    int target = -1;
+    int attackerSessionId = -1;
+    int targetSessionId = -1;
+    int weapon = 0;
+    bool headshot = false;
+    MatchPhase matchPhase = MatchPhase::Unknown;
+    std::string attackerName;
+    std::string targetName;
 };
 
 struct DemoInfo {
@@ -59,7 +78,12 @@ struct DemoInfo {
     double timeLimitMinutes = 0.0;
     std::vector<Player> players;
     std::vector<KillEvent> kills;
+    std::vector<HitEvent> hits;
     std::vector<std::string> warnings;
+    // Filled only when DemoParseOptions::collectProtocolLog is requested.
+    // Normal demo loading and the persistent folder index leave this empty so
+    // a full protocol dump never inflates the SQLite database or scan memory.
+    std::string protocolLog;
 };
 
 struct FragRun {
@@ -67,6 +91,7 @@ struct FragRun {
     int attackerSessionId = -1;
     std::string attackerName;
     std::vector<std::size_t> killIndices;
+    int headshotCount = 0;
     std::int32_t startDemoTimeMs = 0;
     std::int32_t endDemoTimeMs = 0;
 };
@@ -77,6 +102,9 @@ struct RunFilter {
     // value selects one concrete slot/name session.
     int playerSessionId = -1;
     int minimumKills = 2;
+    // 0 disables headshot filtering. A positive value requires that many
+    // confirmed headshot hits during the resulting action.
+    int minimumHeadshots = 0;
     std::int32_t maximumGapMs = 8000; // 0 disables the time-gap split.
     int weapon = -1;                  // -1 means every weapon.
     bool includeTeamKills = false;
@@ -89,9 +117,17 @@ struct RunFilter {
     std::int32_t postDeathExplosiveWindowMs = 0;
 };
 
+struct DemoParseOptions {
+    // Produces a chronological decoded protocol log plus a complete raw hex
+    // representation of every message payload. This is intentionally opt-in.
+    bool collectProtocolLog = false;
+};
+
 class DemoParser {
 public:
-    DemoInfo parse(const std::filesystem::path& path) const;
+    DemoInfo parse(
+        const std::filesystem::path& path,
+        const DemoParseOptions& options = {}) const;
 };
 
 std::vector<FragRun> findFragRuns(const DemoInfo& demo, const RunFilter& filter);

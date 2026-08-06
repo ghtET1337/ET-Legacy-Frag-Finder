@@ -1,0 +1,33 @@
+ET: Legacy Frag Finder 1.7.2 by ght
+
+Headshot action-boundary hotfix
+
+- Headshots still means confirmed HIT_HEADSHOT events, not only kills whose
+  obituary was marked as a headshot.
+- The aggregate now includes confirmed headshots against eventual action
+  victims during the five seconds leading into the first kill. This is the
+  same lead-in shown by Play selected (-5s).
+- The lead-in is cut at the selected player's most recent death, so hits from
+  a previous life can never be attached to the next action.
+- Headshots between the first and last kill, repeated headshots on one victim,
+  Minimum headshots filtering, sorting, Folder scan, Highlights and exports
+  continue to use the same corrected aggregate.
+- Per-kill Event type rows remain labelled HEADSHOT KILL. This is separate
+  from the action's total confirmed headshot-hit count.
+
+Verified regressions
+
+2026-08-01-000359-bremen_b3.dm_84 at 13:19.760 is detected as 4 kills and
+7 headshots. Two of those hits occur at 13:19.320 and 13:19.460, immediately
+before the first obituary. Minimum headshots 7 includes the action; 8 excludes
+it.
+
+2026-05-24-220958-bremen_b3.dm_84 at 14:04.025 remains 5 kills and
+7 headshots.
+
+The SQLite per-hit index introduced in 1.7.1 is reused without reparsing.
+Collections last indexed by 1.7.0 or older still require one Update index pass.
+
+The 1.6.1 playback hotfix remains present: absolute generic demo paths,
+delayed seeking through activeAction, five-second pre-roll, optional
+administrator launch and no-seek diagnostics are unchanged.

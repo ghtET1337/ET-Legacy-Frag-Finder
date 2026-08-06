@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "etl_demo_parser.hpp"
 #include "app_storage.hpp"
+#include "../third_party/sqlite/sqlite3.h"
 
 #include <cassert>
 #include <chrono>
@@ -19,7 +20,8 @@ etlfrag::KillEvent kill(
     bool teamKill = false,
     int attackerSessionId = -1,
     int targetSessionId = -1,
-    etlfrag::MatchPhase phase = etlfrag::MatchPhase::Playing) {
+    etlfrag::MatchPhase phase = etlfrag::MatchPhase::Playing,
+    bool headshot = false) {
     etlfrag::KillEvent event;
     event.serverTimeMs = time;
     event.demoTimeMs = time;
@@ -32,7 +34,28 @@ etlfrag::KillEvent kill(
     event.targetName = targetName;
     event.teamKill = teamKill;
     event.suicide = attacker == target;
+    event.headshot = headshot;
     event.matchPhase = phase;
+    return event;
+}
+
+etlfrag::HitEvent headshot(
+    int time,
+    int attacker,
+    int target,
+    int weapon,
+    int attackerSessionId,
+    int targetSessionId) {
+    etlfrag::HitEvent event;
+    event.serverTimeMs = time;
+    event.demoTimeMs = time;
+    event.attacker = attacker;
+    event.target = target;
+    event.attackerSessionId = attackerSessionId;
+    event.targetSessionId = targetSessionId;
+    event.weapon = weapon;
+    event.headshot = true;
+    event.matchPhase = etlfrag::MatchPhase::Playing;
     return event;
 }
 
@@ -80,6 +103,76 @@ int main() {
     runs = etlfrag::findFragRuns(demo, filter);
     assert(runs.size() == 1);
     assert(runs.front().killIndices.size() == 3);
+
+    etlfrag::DemoInfo headshotAction;
+    headshotAction.players = {{1, 0, "Player", "Player", 1}};
+    headshotAction.kills = {
+        // The previous death is inside the five-second playback lead-in.
+        kill(9400, 5, 1, 3, "Enemy", "Player", false, 5, 0,
+             etlfrag::MatchPhase::Playing, false),
+        kill(10000, 1, 2, 3, "Player", "A", false, 0, 20,
+             etlfrag::MatchPhase::Playing, true),
+        kill(10200, 1, 3, 3, "Player", "B", false, 0, 21,
+             etlfrag::MatchPhase::Playing, false),
+        kill(10400, 1, 4, 3, "Player", "C", false, 0, 22,
+             etlfrag::MatchPhase::Playing, true),
+    };
+    headshotAction.hits = {
+        // Even though it is inside the lead-in, this hit belongs to the
+        // previous life and must be excluded.
+        headshot(9300, 1, 2, 3, 0, 20),
+        // A hit leading directly to the first frag is part of the action.
+        headshot(9500, 1, 2, 3, 0, 20),
+        headshot(10000, 1, 2, 3, 0, 20),
+        headshot(10100, 1, 3, 3, 0, 21),
+        headshot(10200, 1, 3, 3, 0, 21),
+        // The target survives and is not one of this action's victims.
+        headshot(10300, 1, 9, 3, 0, 29),
+        headshot(10400, 1, 4, 3, 0, 22),
+    };
+    filter = {};
+    filter.playerClientNum = 1;
+    filter.minimumKills = 3;
+    filter.minimumHeadshots = 5;
+    runs = etlfrag::findFragRuns(headshotAction, filter);
+    assert(runs.size() == 1);
+    assert(runs.front().killIndices.size() == 3);
+    assert(runs.front().headshotCount == 5);
+    filter.minimumHeadshots = 6;
+    runs = etlfrag::findFragRuns(headshotAction, filter);
+    assert(runs.empty());
+
+    // Regression for 2026-08-01-000359-bremen_b3.dm_84. The first two
+    // confirmed headshots precede the first obituary by 440 ms and 300 ms.
+    etlfrag::DemoInfo reportedHeadshotAction;
+    reportedHeadshotAction.players = {{11, 11, "GOAT/ght!", "GOAT/ght!", 1}};
+    reportedHeadshotAction.kills = {
+        kill(799760, 11, 4, 8, "GOAT/ght!", "o Hornet", false, 11, 4),
+        kill(802100, 11, 7, 8, "GOAT/ght!", "o telminho", false, 11, 7),
+        kill(806420, 11, 9, 7, "GOAT/ght!", "o fishy'", false, 11, 9),
+        kill(809000, 11, 3, 7, "GOAT/ght!", "o Kimi", false, 11, 3),
+    };
+    reportedHeadshotAction.hits = {
+        headshot(799320, 11, 4, 8, 11, 4),
+        headshot(799460, 11, 4, 8, 11, 4),
+        headshot(801660, 11, 7, 8, 11, 7),
+        headshot(802100, 11, 7, 8, 11, 7),
+        headshot(803360, 11, 9, 8, 11, 9),
+        headshot(806140, 11, 9, 7, 11, 9),
+        headshot(809000, 11, 3, 7, 11, 3),
+    };
+    filter = {};
+    filter.playerClientNum = 11;
+    filter.playerSessionId = 11;
+    filter.minimumKills = 4;
+    filter.minimumHeadshots = 7;
+    filter.maximumGapMs = 18000;
+    runs = etlfrag::findFragRuns(reportedHeadshotAction, filter);
+    assert(runs.size() == 1);
+    assert(runs.front().headshotCount == 7);
+    filter.minimumHeadshots = 8;
+    runs = etlfrag::findFragRuns(reportedHeadshotAction, filter);
+    assert(runs.empty());
 
     etlfrag::DemoInfo simultaneous;
     simultaneous.players = {{3, 0, "Player", "Player", 2}};
@@ -231,6 +324,7 @@ int main() {
         std::filesystem::current_path() / "build" /
         ("etl-frag-storage-test-" + std::to_string(unique));
     std::filesystem::create_directories(storageFolder);
+
     const std::filesystem::path demoPath = storageFolder / "2026-08-03-sample.dm_84";
     {
         std::ofstream file(demoPath, std::ios::binary);
@@ -269,6 +363,41 @@ int main() {
         file << "demo fingerprint";
     }
     delayedExplosives.path = demoPath;
+    delayedExplosives.hits = {
+        headshot(1000, 1, 2, 3, 0, 20),
+        headshot(1800, 1, 3, 3, 0, 21),
+    };
+
+    // A 1.7.0 database already has the demos table but no parser_revision
+    // column or headshot_hits table. Verify that opening it performs the
+    // in-place migration and that newly reparsed per-hit data is usable.
+    const std::filesystem::path migrationPath =
+        storageFolder / "demo-index-v3-migration.sqlite3";
+    sqlite3* legacyDatabase = nullptr;
+    assert(sqlite3_open(migrationPath.string().c_str(), &legacyDatabase) == SQLITE_OK);
+    const char* legacySchema =
+        "CREATE TABLE demos("
+        "id INTEGER PRIMARY KEY,path TEXT NOT NULL,path_key TEXT NOT NULL UNIQUE,"
+        "file_name TEXT NOT NULL,recorded_date TEXT NOT NULL,file_size INTEGER NOT NULL,"
+        "modified_ticks INTEGER NOT NULL,partial_hash TEXT NOT NULL,map_name TEXT NOT NULL,"
+        "game_name TEXT NOT NULL,mod_version TEXT NOT NULL,pov_name TEXT NOT NULL,"
+        "pov_client_num INTEGER NOT NULL,first_server_time_ms INTEGER NOT NULL,"
+        "last_server_time_ms INTEGER NOT NULL,level_start_time_ms INTEGER NOT NULL,"
+        "time_limit_minutes REAL NOT NULL,player_count INTEGER NOT NULL,"
+        "event_count INTEGER NOT NULL,indexed_unix INTEGER NOT NULL);";
+    char* legacyError = nullptr;
+    assert(sqlite3_exec(legacyDatabase, legacySchema, nullptr, nullptr, &legacyError) == SQLITE_OK);
+    sqlite3_free(legacyError);
+    assert(sqlite3_close(legacyDatabase) == SQLITE_OK);
+    etlfrag::SqliteDemoIndex migratedIndex;
+    assert(migratedIndex.open(migrationPath, storageError));
+    assert(migratedIndex.upsert(demoPath, delayedExplosives, storageError));
+    const auto migratedDemo = migratedIndex.findFresh(demoPath, storageError);
+    assert(storageError.empty());
+    assert(migratedDemo.has_value());
+    assert(migratedDemo->hits.size() == 2);
+    migratedIndex.close();
+
     etlfrag::SqliteDemoIndex sqliteIndex;
     const std::filesystem::path sqlitePath = storageFolder / "demo-index.sqlite3";
     assert(sqliteIndex.open(sqlitePath, storageError));
@@ -278,7 +407,19 @@ int main() {
     assert(freshSqliteDemo.has_value());
     assert(freshSqliteDemo->players.front().sessionId == 0);
     assert(freshSqliteDemo->kills.front().matchPhase == etlfrag::MatchPhase::Playing);
+    assert(freshSqliteDemo->hits.size() == 2);
+    assert(freshSqliteDemo->hits.front().attackerSessionId == 0);
+    assert(freshSqliteDemo->hits.front().targetSessionId == 20);
     assert(freshSqliteDemo->warnings == delayedExplosives.warnings);
+    etlfrag::RunFilter cachedHeadshotFilter;
+    cachedHeadshotFilter.playerClientNum = 1;
+    cachedHeadshotFilter.playerSessionId = 0;
+    cachedHeadshotFilter.minimumKills = 2;
+    cachedHeadshotFilter.minimumHeadshots = 2;
+    const auto cachedHeadshotRuns =
+        etlfrag::findFragRuns(*freshSqliteDemo, cachedHeadshotFilter);
+    assert(cachedHeadshotRuns.size() == 1);
+    assert(cachedHeadshotRuns.front().headshotCount == 2);
     const auto originalSqliteTimestamp = std::filesystem::last_write_time(demoPath);
     {
         std::ofstream file(demoPath, std::ios::binary | std::ios::trunc);
@@ -359,6 +500,7 @@ int main() {
     savedHighlight.startDemoTimeMs = 1000;
     savedHighlight.endDemoTimeMs = 2000;
     savedHighlight.matchRemainingMs = 599000;
+    savedHighlight.headshotCount = 3;
     savedHighlight.description = "Mine A (Landmine), Mine B (Landmine)";
     savedHighlight.events = {
         {1000, "Mine A", "Landmine", false, false},
@@ -371,6 +513,7 @@ int main() {
     assert(restoredHighlights.size() == 1);
     assert(etlfrag::sameHighlight(savedHighlight, restoredHighlights.front()));
     assert(restoredHighlights.front().events.size() == 2);
+    assert(restoredHighlights.front().headshotCount == 3);
 
     std::filesystem::remove_all(storageFolder);
     return 0;
