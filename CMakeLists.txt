@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ETLFragFinder VERSION 1.7.2 LANGUAGES C CXX)
+project(ETLFragFinder VERSION 1.7.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,7 @@ add_library(etl_demo_parser STATIC
     src/etl_demo_parser.cpp
     src/idtech3_huffman.cpp
     src/app_storage.cpp
+    src/clip_export.cpp
 )
 target_include_directories(etl_demo_parser PUBLIC src)
 target_link_libraries(etl_demo_parser PUBLIC etl_sqlite)
@@ -38,9 +39,14 @@ add_executable(etl-frag-cli src/main_cli.cpp)
 target_link_libraries(etl-frag-cli PRIVATE etl_demo_parser)
 
 if(WIN32)
-    add_executable(ETLFragFinder WIN32 src/win_main.cpp src/app.rc)
+    add_executable(
+        ETLFragFinder WIN32
+        src/win_main.cpp
+        src/clip_export_window.cpp
+        src/app.rc)
     target_link_libraries(
-        ETLFragFinder PRIVATE etl_demo_parser comctl32 comdlg32 shell32 ole32 uuid gdi32 dwmapi uxtheme)
+        ETLFragFinder PRIVATE etl_demo_parser comctl32 comdlg32 shell32 ole32 uuid
+        gdi32 dwmapi uxtheme)
     if(MSVC)
         target_compile_options(ETLFragFinder PRIVATE /W4 /permissive- /utf-8)
     endif()
@@ -56,4 +62,8 @@ if(BUILD_TESTING)
     add_executable(etl-frag-tests tests/test_frag_runs.cpp)
     target_link_libraries(etl-frag-tests PRIVATE etl_demo_parser)
     add_test(NAME frag-runs COMMAND etl-frag-tests)
+
+    add_executable(etl-clip-export-tests tests/test_clip_export.cpp)
+    target_link_libraries(etl-clip-export-tests PRIVATE etl_demo_parser)
+    add_test(NAME clip-export COMMAND etl-clip-export-tests)
 endif()

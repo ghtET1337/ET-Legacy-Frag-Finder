@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "etl_demo_parser.hpp"
 #include "app_storage.hpp"
+#include "clip_export_window.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -9,6 +10,7 @@
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <uxtheme.h>
 
@@ -46,6 +48,20 @@ constexpr UINT kFolderScanProgressMessage = WM_APP + 1;
 constexpr UINT kFolderScanCompleteMessage = WM_APP + 2;
 constexpr UINT kFolderChangedMessage = WM_APP + 3;
 constexpr UINT_PTR kFolderWatchDebounceTimer = 5001;
+constexpr UINT kFolderMenuOpenLocation = 9101;
+constexpr UINT kFolderMenuCopyConsoleCommand = 9102;
+constexpr UINT kFolderMenuAddRenderQueue = 9103;
+constexpr UINT kFolderMenuLoadMultiKills = 9104;
+constexpr UINT kEtlSetupProfileDefault = 9201;
+constexpr UINT kEtlSetupChooseHome = 9202;
+constexpr UINT kEtlSetupRefreshProfiles = 9203;
+constexpr UINT kEtlSetupConfigNone = 9204;
+constexpr UINT kEtlSetupConfigDestiny = 9205;
+constexpr UINT kEtlSetupConfigCustom = 9206;
+constexpr UINT kEtlSetupUseDocumentsHome = 9207;
+constexpr UINT kEtlSetupCleanupGeneratedProfiles = 9208;
+constexpr UINT kEtlSetupProfileBase = 9300;
+constexpr UINT kEtlSetupProfileLimit = 200;
 
 constexpr COLORREF kBackground = RGB(14, 17, 21);
 constexpr COLORREF kHeader = RGB(18, 22, 27);
@@ -72,6 +88,7 @@ enum ControlId {
     IdExportCurrent,
     IdLaunchAsAdministrator,
     IdLaunchWithoutSeeking,
+    IdLaunchSetup,
     IdPlayer,
     IdMinimumKills,
     IdMinimumHeadshots,
@@ -85,11 +102,14 @@ enum ControlId {
     IdChooseEtl,
     IdPlayRun,
     IdAddRunHighlight,
+    IdRenderRun,
+    IdRenderQueue,
     IdRunList,
     IdRunKillList,
     IdAllEventList,
     IdEventPlayer,
     IdPlayEvent,
+    IdRenderEvent,
     IdViewProtocolLog,
     IdFolderPath,
     IdChooseFolder,
@@ -107,12 +127,15 @@ enum ControlId {
     IdFolderScan,
     IdPlayFolderRun,
     IdAddFolderHighlight,
+    IdRenderFolderRun,
     IdFolderRunList,
     IdFolderKillList,
     IdFolderWatch,
     IdTimeline,
     IdHighlightInfo,
     IdPlayHighlight,
+    IdRenderHighlight,
+    IdRenderAllHighlights,
     IdRemoveHighlight,
     IdClearHighlights,
     IdHighlightList,
@@ -235,6 +258,7 @@ struct AppState {
     HWND exportCurrent = nullptr;
     HWND launchAsAdministrator = nullptr;
     HWND launchWithoutSeekingControl = nullptr;
+    HWND launchSetup = nullptr;
     HWND playerLabel = nullptr;
     HWND player = nullptr;
     HWND minimumLabel = nullptr;
@@ -254,12 +278,15 @@ struct AppState {
     HWND chooseEtl = nullptr;
     HWND playRun = nullptr;
     HWND addRunHighlight = nullptr;
+    HWND renderRun = nullptr;
+    HWND renderQueue = nullptr;
     HWND runList = nullptr;
     HWND runKillList = nullptr;
     HWND allEventList = nullptr;
     HWND eventPlayerLabel = nullptr;
     HWND eventPlayer = nullptr;
     HWND playEvent = nullptr;
+    HWND renderEvent = nullptr;
     HWND viewProtocolLog = nullptr;
     HWND folderPath = nullptr;
     HWND chooseFolder = nullptr;
@@ -284,12 +311,15 @@ struct AppState {
     HWND folderScan = nullptr;
     HWND playFolderRun = nullptr;
     HWND addFolderHighlight = nullptr;
+    HWND renderFolderRun = nullptr;
     HWND folderRunList = nullptr;
     HWND folderKillList = nullptr;
     HWND folderWatch = nullptr;
     HWND timeline = nullptr;
     HWND highlightInfo = nullptr;
     HWND playHighlight = nullptr;
+    HWND renderHighlight = nullptr;
+    HWND renderAllHighlights = nullptr;
     HWND removeHighlight = nullptr;
     HWND clearHighlights = nullptr;
     HWND highlightList = nullptr;
@@ -317,6 +347,7 @@ struct AppState {
     bool demoLoaded = false;
     bool launchEtlAsAdministrator = false;
     bool launchWithoutSeeking = false;
+    bool startupConfigIsDestiny = false;
     bool includeTeamKills = false;
     bool includeWarmupKills = false;
     bool postDeathExplosivesEnabled = false;
@@ -368,6 +399,10 @@ struct AppState {
     std::vector<etlfrag::HighlightItem> highlights;
     std::filesystem::path demoFolder;
     std::filesystem::path etlExecutable;
+    std::filesystem::path etlHomeFolder;
+    std::filesystem::path sourceProfileFolder;
+    std::filesystem::path startupConfig;
+    std::vector<etlfrag::EtlProfileInfo> etlProfiles;
     std::filesystem::path iniPath;
     std::filesystem::path dataFolder;
     std::filesystem::path indexPath;
@@ -390,6 +425,8 @@ void updateWindowTitle();
 void showTab(int tab);
 void searchLibrary(bool reportStatus);
 etlfrag::DemoSearchField selectedSearchField(HWND fieldControl);
+void addSelectedFolderRunToRenderQueue();
+void loadSelectedFolderDemoInMultiKills();
 
 int scale(int value) {
     return MulDiv(value, gApp.dpi, 96);
@@ -991,6 +1028,70 @@ bool saveEtlPath() {
                L"ETLegacy", L"Executable", gApp.etlExecutable.c_str(), gApp.iniPath.c_str()) != FALSE;
 }
 
+std::wstring readIniString(const wchar_t* section, const wchar_t* key) {
+    std::wstring value(32768, L'\0');
+    const DWORD length = GetPrivateProfileStringW(
+        section,
+        key,
+        L"",
+        value.data(),
+        static_cast<DWORD>(value.size()),
+        gApp.iniPath.c_str());
+    value.resize(length);
+    return value;
+}
+
+std::filesystem::path windowsDocumentsFolder() {
+    PWSTR rawPath = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &rawPath)) &&
+        rawPath != nullptr) {
+        const std::filesystem::path result(rawPath);
+        CoTaskMemFree(rawPath);
+        return result;
+    }
+    const std::wstring userProfile = environmentValue(L"USERPROFILE");
+    if (!userProfile.empty()) {
+        return std::filesystem::path(userProfile) / L"Documents";
+    }
+    return {};
+}
+
+std::filesystem::path documentsEtlHomeFolder() {
+    const std::filesystem::path documents = windowsDocumentsFolder();
+    return documents.empty() ? std::filesystem::path{} : documents / L"ETLegacy";
+}
+
+bool sameExistingPath(
+    const std::filesystem::path& left,
+    const std::filesystem::path& right) {
+    if (left.empty() || right.empty()) return left.empty() && right.empty();
+    std::error_code error;
+    if (std::filesystem::equivalent(left, right, error) && !error) return true;
+    return left.lexically_normal() == right.lexically_normal();
+}
+
+std::filesystem::path defaultEtlHomeFolder() {
+    const std::filesystem::path explicitUserData =
+        std::filesystem::path(readIniString(L"ETLegacy", L"UserDataFolder"));
+    const std::filesystem::path legacyClipHome =
+        std::filesystem::path(readIniString(L"ClipExport", L"EtlHomeFolder"));
+    const std::filesystem::path standardHome = documentsEtlHomeFolder();
+
+    // Older builds called this value "ETL home", which led users to select
+    // the installation directory next to etl.exe. Accept it only when it
+    // actually contains profile data; otherwise prefer Windows' real default
+    // fs_homepath under Documents\ETLegacy. The new explicit UserDataFolder
+    // remains authoritative even before a profile is created there.
+    const std::filesystem::path selected = etlfrag::selectEtlUserDataFolder(
+        explicitUserData, legacyClipHome, standardHome);
+    return selected.empty() ? modulePath().parent_path() : selected;
+}
+
+std::filesystem::path destinyConfigPath() {
+    return modulePath().parent_path() / L"presets" / L"destiny-fragmovie.cfg";
+}
+
 bool savePlaybackSettings() {
     const BOOL administratorSaved = WritePrivateProfileStringW(
         L"Playback",
@@ -1002,7 +1103,73 @@ bool savePlaybackSettings() {
         L"LaunchWithoutSeeking",
         gApp.launchWithoutSeeking ? L"1" : L"0",
         gApp.iniPath.c_str());
-    return administratorSaved != FALSE && noSeekSaved != FALSE;
+    const BOOL profileSaved = WritePrivateProfileStringW(
+        L"Playback",
+        L"ProfileFolder",
+        gApp.sourceProfileFolder.c_str(),
+        gApp.iniPath.c_str());
+    const std::wstring startupConfigSetting =
+        gApp.startupConfigIsDestiny ? L"@destiny" : gApp.startupConfig.wstring();
+    const BOOL configSaved = WritePrivateProfileStringW(
+        L"Playback",
+        L"StartupConfig",
+        startupConfigSetting.c_str(),
+        gApp.iniPath.c_str());
+    const BOOL homeSaved = WritePrivateProfileStringW(
+        L"ClipExport",
+        L"EtlHomeFolder",
+        gApp.etlHomeFolder.c_str(),
+        gApp.iniPath.c_str());
+    const BOOL userDataSaved = WritePrivateProfileStringW(
+        L"ETLegacy",
+        L"UserDataFolder",
+        gApp.etlHomeFolder.c_str(),
+        gApp.iniPath.c_str());
+    return administratorSaved != FALSE && noSeekSaved != FALSE &&
+           profileSaved != FALSE && configSaved != FALSE && homeSaved != FALSE &&
+           userDataSaved != FALSE;
+}
+
+std::wstring selectedProfileLabel() {
+    if (gApp.sourceProfileFolder.empty()) return L"Default";
+    for (const etlfrag::EtlProfileInfo& profile : gApp.etlProfiles) {
+        std::error_code error;
+        if (std::filesystem::equivalent(
+                profile.folder, gApp.sourceProfileFolder, error) && !error) {
+            return profile.name;
+        }
+    }
+    return gApp.sourceProfileFolder.filename().wstring();
+}
+
+std::wstring selectedConfigLabel() {
+    if (gApp.startupConfig.empty()) return L"No CFG";
+    if (gApp.startupConfigIsDestiny) return L"Destiny CFG";
+    return gApp.startupConfig.filename().wstring();
+}
+
+void updateEtlSetupLabel() {
+    if (gApp.launchSetup == nullptr) return;
+    const std::wstring label =
+        L"Profile: " + selectedProfileLabel() + L"  •  " + selectedConfigLabel();
+    SetWindowTextW(gApp.launchSetup, label.c_str());
+}
+
+void refreshEtlProfiles() {
+    gApp.etlProfiles = etlfrag::discoverEtlProfiles(gApp.etlHomeFolder);
+    if (!gApp.sourceProfileFolder.empty()) {
+        const bool stillAvailable = std::any_of(
+            gApp.etlProfiles.begin(),
+            gApp.etlProfiles.end(),
+            [](const etlfrag::EtlProfileInfo& profile) {
+                return sameExistingPath(profile.folder, gApp.sourceProfileFolder);
+            });
+        if (!stillAvailable) {
+            gApp.sourceProfileFolder.clear();
+            savePlaybackSettings();
+        }
+    }
+    updateEtlSetupLabel();
 }
 
 void updatePlaybackButtonLabels() {
@@ -1166,6 +1333,325 @@ std::optional<std::filesystem::path> chooseDemoFolder() {
     }
     dialog->Release();
     return folder;
+}
+
+std::optional<std::filesystem::path> chooseEtlHomeFolder() {
+    IFileOpenDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(
+            CLSID_FileOpenDialog,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&dialog))) || dialog == nullptr) {
+        MessageBoxW(
+            gApp.window,
+            L"The ET: Legacy user-data folder dialog could not be opened.",
+            L"ETL setup error",
+            MB_OK | MB_ICONERROR);
+        return std::nullopt;
+    }
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(
+        options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST |
+        FOS_DONTADDTORECENT);
+    dialog->SetTitle(
+        L"Choose ETL user data / fs_homepath (normally Documents\\ETLegacy)");
+    std::error_code initialError;
+    if (std::filesystem::is_directory(gApp.etlHomeFolder, initialError) && !initialError) {
+        IShellItem* initial = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(
+                gApp.etlHomeFolder.c_str(), nullptr, IID_PPV_ARGS(&initial))) &&
+            initial != nullptr) {
+            dialog->SetFolder(initial);
+            initial->Release();
+        }
+    }
+
+    std::optional<std::filesystem::path> result;
+    if (SUCCEEDED(dialog->Show(gApp.window))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr) {
+            PWSTR rawPath = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &rawPath)) &&
+                rawPath != nullptr) {
+                result = std::filesystem::path(rawPath);
+                CoTaskMemFree(rawPath);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
+    return result;
+}
+
+std::optional<std::filesystem::path> chooseStartupConfig() {
+    std::wstring file(32768, L'\0');
+    if (!gApp.startupConfig.empty()) {
+        const std::wstring current = gApp.startupConfig.wstring();
+        std::copy_n(current.begin(), std::min(current.size(), file.size() - 1), file.begin());
+    }
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = gApp.window;
+    dialog.lpstrFilter = L"ET: Legacy configs (*.cfg)\0*.cfg\0All files\0*.*\0\0";
+    dialog.lpstrFile = file.data();
+    dialog.nMaxFile = static_cast<DWORD>(file.size());
+    dialog.lpstrTitle = L"Choose an ET: Legacy startup CFG";
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&dialog)) return std::nullopt;
+    return std::filesystem::path(file.c_str());
+}
+
+std::wstring popupMenuText(std::wstring text) {
+    std::size_t position = 0;
+    while ((position = text.find(L'&', position)) != std::wstring::npos) {
+        text.insert(position, 1, L'&');
+        position += 2;
+    }
+    return text;
+}
+
+void showEtlLaunchSetupMenu() {
+    refreshEtlProfiles();
+    const std::vector<std::filesystem::path> generatedProfiles =
+        etlfrag::discoverLegacyFragFinderProfiles(gApp.etlHomeFolder);
+    HMENU menu = CreatePopupMenu();
+    HMENU profiles = CreatePopupMenu();
+    HMENU configs = CreatePopupMenu();
+    if (menu == nullptr || profiles == nullptr || configs == nullptr) {
+        if (menu != nullptr) DestroyMenu(menu);
+        if (profiles != nullptr) DestroyMenu(profiles);
+        if (configs != nullptr) DestroyMenu(configs);
+        return;
+    }
+
+    AppendMenuW(
+        profiles,
+        MF_STRING | (gApp.sourceProfileFolder.empty() ? MF_CHECKED : 0),
+        kEtlSetupProfileDefault,
+        L"Default / current ETL profile (no CFG replacement)");
+    AppendMenuW(profiles, MF_SEPARATOR, 0, nullptr);
+    const std::size_t visibleProfiles = std::min<std::size_t>(
+        gApp.etlProfiles.size(), kEtlSetupProfileLimit);
+    for (std::size_t index = 0; index < visibleProfiles; ++index) {
+        const etlfrag::EtlProfileInfo& profile = gApp.etlProfiles[index];
+        const std::wstring label =
+            popupMenuText(profile.name + L"  [" + profile.modName + L"]");
+        AppendMenuW(
+            profiles,
+            MF_STRING |
+                (sameExistingPath(profile.folder, gApp.sourceProfileFolder) ? MF_CHECKED : 0),
+            kEtlSetupProfileBase + static_cast<UINT>(index),
+            label.c_str());
+    }
+    if (visibleProfiles == 0) {
+        AppendMenuW(
+            profiles,
+            MF_STRING | MF_DISABLED,
+            0,
+            L"No profiles found in this ETL user-data folder");
+    } else if (visibleProfiles < gApp.etlProfiles.size()) {
+        AppendMenuW(profiles, MF_STRING | MF_DISABLED, 0, L"Additional profiles omitted");
+    }
+
+    AppendMenuW(
+        configs,
+        MF_STRING | (gApp.startupConfig.empty() ? MF_CHECKED : 0),
+        kEtlSetupConfigNone,
+        L"No startup CFG");
+    AppendMenuW(
+        configs,
+        MF_STRING | (gApp.startupConfigIsDestiny ? MF_CHECKED : 0),
+        kEtlSetupConfigDestiny,
+        L"Destiny fragmovie example (Israel)");
+    AppendMenuW(configs, MF_SEPARATOR, 0, nullptr);
+    std::wstring customLabel = L"Choose custom CFG...";
+    if (!gApp.startupConfig.empty() && !gApp.startupConfigIsDestiny) {
+        customLabel += L"  [" + gApp.startupConfig.filename().wstring() + L"]";
+    }
+    customLabel = popupMenuText(customLabel);
+    AppendMenuW(configs, MF_STRING, kEtlSetupConfigCustom, customLabel.c_str());
+
+    AppendMenuW(
+        menu,
+        MF_POPUP,
+        reinterpret_cast<UINT_PTR>(profiles),
+        L"ETL launch profile");
+    AppendMenuW(
+        menu,
+        MF_POPUP,
+        reinterpret_cast<UINT_PTR>(configs),
+        L"CFG installed as selected profile's etconfig.cfg");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    const std::wstring homeLabel = popupMenuText(
+        L"ETL user data (fs_homepath): " + gApp.etlHomeFolder.wstring());
+    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, homeLabel.c_str());
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        kEtlSetupUseDocumentsHome,
+        L"Use default Documents\\ETLegacy");
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        kEtlSetupChooseHome,
+        L"Choose ETL user-data folder...");
+    AppendMenuW(menu, MF_STRING, kEtlSetupRefreshProfiles, L"Refresh detected profiles");
+    const std::wstring cleanupLabel = generatedProfiles.empty()
+                                          ? L"No old ff_play / ff_render profiles found"
+                                          : L"Remove old ff_play / ff_render profiles (" +
+                                                std::to_wstring(generatedProfiles.size()) +
+                                                L")...";
+    AppendMenuW(
+        menu,
+        MF_STRING | (generatedProfiles.empty() ? MF_DISABLED : 0),
+        kEtlSetupCleanupGeneratedProfiles,
+        cleanupLabel.c_str());
+
+    RECT button{};
+    GetWindowRect(gApp.launchSetup, &button);
+    const UINT selected = TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+        button.left,
+        button.bottom,
+        0,
+        gApp.window,
+        nullptr);
+    DestroyMenu(menu);
+
+    bool changed = false;
+    if (selected == kEtlSetupProfileDefault) {
+        gApp.sourceProfileFolder.clear();
+        changed = true;
+        setStatus(L"ETL profile set to Default / current.");
+    } else if (selected >= kEtlSetupProfileBase &&
+               selected < kEtlSetupProfileBase + visibleProfiles) {
+        const etlfrag::EtlProfileInfo& profile =
+            gApp.etlProfiles[selected - kEtlSetupProfileBase];
+        gApp.sourceProfileFolder = profile.folder;
+        changed = true;
+        setStatus(
+            L"Selected ETL launch profile: " + profile.name + L" [" +
+            profile.modName + L"]. Frag Finder will not create a profile copy.");
+    } else if (selected == kEtlSetupConfigNone) {
+        gApp.startupConfig.clear();
+        gApp.startupConfigIsDestiny = false;
+        changed = true;
+        setStatus(L"Startup CFG disabled.");
+    } else if (selected == kEtlSetupConfigDestiny) {
+        const std::filesystem::path preset = destinyConfigPath();
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(preset, error) || error) {
+            MessageBoxW(
+                gApp.window,
+                (L"The bundled Destiny fragmovie CFG is missing:\n\n" + preset.wstring()).c_str(),
+                L"CFG not found",
+                MB_OK | MB_ICONERROR);
+        } else {
+            gApp.startupConfig = preset;
+            gApp.startupConfigIsDestiny = true;
+            changed = true;
+            setStatus(
+                L"Selected the Destiny fragmovie CFG. Before launch it will replace the selected profile's etconfig.cfg after a timestamped backup.");
+        }
+    } else if (selected == kEtlSetupConfigCustom) {
+        if (const auto config = chooseStartupConfig(); config.has_value()) {
+            gApp.startupConfig = *config;
+            gApp.startupConfigIsDestiny = false;
+            changed = true;
+            setStatus(
+                L"Selected CFG: " + config->filename().wstring() +
+                L". It will be installed as the selected profile's etconfig.cfg after backup.");
+        }
+    } else if (selected == kEtlSetupUseDocumentsHome) {
+        const std::filesystem::path standardHome = documentsEtlHomeFolder();
+        if (standardHome.empty()) {
+            MessageBoxW(
+                gApp.window,
+                L"Windows did not return a Documents folder.",
+                L"ETL user-data folder",
+                MB_OK | MB_ICONWARNING);
+        } else {
+            gApp.etlHomeFolder = standardHome;
+            gApp.sourceProfileFolder.clear();
+            refreshEtlProfiles();
+            changed = true;
+            setStatus(
+                L"ETL user data set to " + standardHome.wstring() + L" • " +
+                std::to_wstring(gApp.etlProfiles.size()) + L" profile(s) detected.");
+        }
+    } else if (selected == kEtlSetupChooseHome) {
+        if (const auto folder = chooseEtlHomeFolder(); folder.has_value()) {
+            gApp.etlHomeFolder = *folder;
+            gApp.sourceProfileFolder.clear();
+            refreshEtlProfiles();
+            changed = true;
+            setStatus(
+                L"ETL user-data folder changed. Select a launch profile from the refreshed list.");
+        }
+    } else if (selected == kEtlSetupRefreshProfiles) {
+        refreshEtlProfiles();
+        setStatus(
+            L"Detected " + std::to_wstring(gApp.etlProfiles.size()) +
+            L" ETL profile folder(s) in the selected home.");
+    } else if (selected == kEtlSetupCleanupGeneratedProfiles &&
+               !generatedProfiles.empty()) {
+        std::wstring message =
+            L"Frag Finder no longer creates ff_play_* or ff_render_* profiles.\n\n"
+            L"Delete these old generated profile folders?\n";
+        const std::size_t shown = std::min<std::size_t>(generatedProfiles.size(), 10);
+        for (std::size_t index = 0; index < shown; ++index) {
+            message += L"\n• " + generatedProfiles[index].wstring();
+        }
+        if (shown < generatedProfiles.size()) {
+            message += L"\n\n…and " +
+                       std::to_wstring(generatedProfiles.size() - shown) + L" more.";
+        }
+        message += L"\n\nThis deletion cannot be undone.";
+        if (MessageBoxW(
+                gApp.window,
+                message.c_str(),
+                L"Remove old Frag Finder profiles",
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
+            std::size_t removed = 0;
+            std::vector<std::filesystem::path> failed;
+            for (const std::filesystem::path& folder : generatedProfiles) {
+                std::error_code removeError;
+                const std::uintmax_t count = std::filesystem::remove_all(folder, removeError);
+                if (!removeError && count > 0) {
+                    ++removed;
+                } else {
+                    failed.push_back(folder);
+                }
+            }
+            refreshEtlProfiles();
+            if (failed.empty()) {
+                setStatus(
+                    L"Removed " + std::to_wstring(removed) +
+                    L" old Frag Finder profile folder(s).");
+            } else {
+                MessageBoxW(
+                    gApp.window,
+                    (L"Removed " + std::to_wstring(removed) + L" folder(s), but " +
+                     std::to_wstring(failed.size()) +
+                     L" could not be removed. Close ET: Legacy and try again.").c_str(),
+                    L"Profile cleanup incomplete",
+                    MB_OK | MB_ICONWARNING);
+            }
+        }
+    }
+
+    if (changed) {
+        updateEtlSetupLabel();
+        if (!savePlaybackSettings()) {
+            MessageBoxW(
+                gApp.window,
+                L"The ETL profile/CFG selection could not be saved.",
+                L"Settings warning",
+                MB_OK | MB_ICONWARNING);
+        }
+    }
 }
 
 int inspectorScale(const ProtocolInspectorState& state, int value) {
@@ -2031,6 +2517,7 @@ void populateAllEvents() {
             LVIS_SELECTED | LVIS_FOCUSED);
     }
     EnableWindow(gApp.playEvent, hasEvents);
+    EnableWindow(gApp.renderEvent, hasEvents);
     updateTabLabels();
     InvalidateRect(gApp.timeline, nullptr, FALSE);
 }
@@ -2072,6 +2559,7 @@ void populateFolderKillDetails(int rowIndex) {
     if (rowIndex < 0 || rowIndex >= static_cast<int>(gApp.folderRows.size())) {
         EnableWindow(gApp.playFolderRun, FALSE);
         EnableWindow(gApp.addFolderHighlight, FALSE);
+        EnableWindow(gApp.renderFolderRun, FALSE);
         return;
     }
 
@@ -2079,6 +2567,7 @@ void populateFolderKillDetails(int rowIndex) {
     if (runIndex >= gApp.folderRuns.size()) {
         EnableWindow(gApp.playFolderRun, FALSE);
         EnableWindow(gApp.addFolderHighlight, FALSE);
+        EnableWindow(gApp.renderFolderRun, FALSE);
         return;
     }
     const FolderRunResult& result = gApp.folderRuns[runIndex];
@@ -2107,6 +2596,7 @@ void populateFolderKillDetails(int rowIndex) {
     loadFolderTimelineForResult(runIndex);
     EnableWindow(gApp.playFolderRun, TRUE);
     EnableWindow(gApp.addFolderHighlight, TRUE);
+    EnableWindow(gApp.renderFolderRun, TRUE);
 }
 
 void loadFolderTimelineForResult(std::size_t resultIndex) {
@@ -2197,6 +2687,7 @@ void populateFolderResults() {
     const bool hasResults = !gApp.folderRows.empty();
     EnableWindow(gApp.playFolderRun, hasResults);
     EnableWindow(gApp.addFolderHighlight, hasResults);
+    EnableWindow(gApp.renderFolderRun, hasResults);
     applyListSort(gApp.folderRunList, gApp.folderRunSort);
     if (hasResults) {
         ListView_SetItemState(
@@ -2500,6 +2991,7 @@ void setDemoFolder(const std::filesystem::path& folder) {
     ListView_DeleteAllItems(gApp.folderKillList);
     EnableWindow(gApp.playFolderRun, FALSE);
     EnableWindow(gApp.addFolderHighlight, FALSE);
+    EnableWindow(gApp.renderFolderRun, FALSE);
     const std::vector<std::filesystem::path> files = findDemoFiles(folder, nullptr);
     gApp.folderFilesFound = files.size();
     refreshFolderDemos(true);
@@ -2752,6 +3244,7 @@ void searchRuns() {
 
     EnableWindow(gApp.playRun, !gApp.runs.empty());
     EnableWindow(gApp.addRunHighlight, !gApp.runs.empty());
+    EnableWindow(gApp.renderRun, !gApp.runs.empty());
     applyListSort(gApp.runList, gApp.runSort);
     if (!gApp.runs.empty()) {
         ListView_SetItemState(
@@ -2914,29 +3407,37 @@ void playAtPath(
                                         ? std::max<std::int32_t>(
                                               0, demoTimeMs - kPlaybackPrerollMs)
                                         : 0;
-        std::wostringstream seconds;
-        seconds.setf(std::ios::fixed);
-        seconds.precision(3);
-        seconds << static_cast<double>(seekMs) / 1000.0;
-
         // ET: Legacy accepts an absolute demo path, but on Windows its demo
         // loader looks for '/' when it extracts the file name.  Supplying the
         // generic form keeps the absolute-path and downstream demo-name logic
         // consistent on every supported ETL release.
         const std::filesystem::path absoluteDemo =
             std::filesystem::absolute(demoPath).lexically_normal();
-        const std::wstring engineDemoPath = absoluteDemo.generic_wstring();
+
+        std::wstring launchProfile;
+        std::filesystem::path previousConfigBackup;
+        std::wstring preparationError;
+        if (!etlfrag::prepareEtlLaunchProfile(
+                gApp.etlHomeFolder,
+                absoluteDemo,
+                gApp.sourceProfileFolder,
+                gApp.startupConfig,
+                launchProfile,
+                previousConfigBackup,
+                preparationError)) {
+            throw std::runtime_error(toUtf8(preparationError));
+        }
 
         // Do not execute `seek` as the next startup command.  At that point
         // `demo` has only advanced the client to CA_PRIMED; cgame and the first
         // active snapshot are not ready yet.  ETL's activeAction is explicitly
         // run by CL_FirstSnapshot after the demo becomes active, which makes
         // seeking safe for both current and older ET: Legacy clients.
-        std::wstring arguments;
-        if (automaticSeek && seekMs > 0) {
-            arguments = L"+set activeAction \"seek " + seconds.str() + L"\" ";
-        }
-        arguments += L"+demo \"" + engineDemoPath + L"\"";
+        const std::wstring arguments = etlfrag::buildEtlPlaybackArguments(
+            absoluteDemo,
+            gApp.etlHomeFolder,
+            launchProfile,
+            automaticSeek ? std::optional<std::int32_t>(seekMs) : std::nullopt);
 
         // A shortcut's compatibility flag is not inherited when Frag Finder
         // starts etl.exe directly. The explicit runas verb asks Windows for
@@ -2961,7 +3462,7 @@ void playAtPath(
             if (log) {
                 SYSTEMTIME now{};
                 GetLocalTime(&now);
-                log << "ET: Legacy Frag Finder 1.7.2 playback launch\r\n"
+                log << "ET: Legacy Frag Finder 1.7.3 playback launch\r\n"
                     << "Time: " << std::setfill('0') << std::setw(4) << now.wYear << '-'
                     << std::setw(2) << now.wMonth << '-' << std::setw(2) << now.wDay << ' '
                     << std::setw(2) << now.wHour << ':' << std::setw(2) << now.wMinute << ':'
@@ -2974,6 +3475,26 @@ void playAtPath(
                     << "Administrator requested: "
                     << (gApp.launchEtlAsAdministrator ? "yes" : "no") << "\r\n"
                     << "Automatic seek enabled: " << (automaticSeek ? "yes" : "no")
+                    << "\r\n"
+                    << "ETL user data (fs_homepath): "
+                    << toUtf8(gApp.etlHomeFolder.wstring()) << "\r\n"
+                    << "Selected profile folder: "
+                    << (gApp.sourceProfileFolder.empty()
+                            ? "default/current"
+                            : toUtf8(gApp.sourceProfileFolder.wstring()))
+                    << "\r\n"
+                    << "ETL launch profile: "
+                    << (launchProfile.empty() ? "default/current" : toUtf8(launchProfile))
+                    << "\r\n"
+                    << "Installed profile CFG: "
+                    << (gApp.startupConfig.empty()
+                            ? "none"
+                            : toUtf8(gApp.startupConfig.wstring()))
+                    << "\r\n"
+                    << "Previous etconfig backup: "
+                    << (previousConfigBackup.empty()
+                            ? "not required"
+                            : toUtf8(previousConfigBackup.wstring()))
                     << "\r\n"
                     << "Requested event time (ms): " << demoTimeMs << "\r\n"
                     << "Effective seek time (ms): " << seekMs << "\r\n"
@@ -3034,6 +3555,153 @@ void playSelectedEvent() {
     }
 }
 
+const FolderRunResult* selectedFolderRunResult() {
+    const int rowIndex = selectedListData(gApp.folderRunList);
+    if (rowIndex < 0 || rowIndex >= static_cast<int>(gApp.folderRows.size())) {
+        return nullptr;
+    }
+    const std::size_t runIndex = gApp.folderRows[static_cast<std::size_t>(rowIndex)];
+    return runIndex < gApp.folderRuns.size() ? &gApp.folderRuns[runIndex] : nullptr;
+}
+
+bool copyUnicodeText(const std::wstring& value) {
+    if (!OpenClipboard(gApp.window)) return false;
+    bool copied = false;
+    HGLOBAL memory = nullptr;
+    if (EmptyClipboard()) {
+        const SIZE_T bytes = (value.size() + 1) * sizeof(wchar_t);
+        memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (memory != nullptr) {
+            void* destination = GlobalLock(memory);
+            if (destination != nullptr) {
+                std::memcpy(destination, value.c_str(), bytes);
+                GlobalUnlock(memory);
+                if (SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
+                    copied = true;
+                    memory = nullptr; // The clipboard now owns this handle.
+                }
+            }
+        }
+    }
+    if (memory != nullptr) GlobalFree(memory);
+    CloseClipboard();
+    return copied;
+}
+
+void openSelectedFolderDemoLocation() {
+    const FolderRunResult* result = selectedFolderRunResult();
+    if (result == nullptr) return;
+    if (!std::filesystem::is_regular_file(result->demo.path)) {
+        MessageBoxW(
+            gApp.window,
+            L"The selected demo file no longer exists.",
+            L"Open demo location",
+            MB_OK | MB_ICONWARNING);
+        return;
+    }
+    const std::filesystem::path absolute =
+        std::filesystem::absolute(result->demo.path).lexically_normal();
+    const std::wstring parameters = L"/select,\"" + absolute.wstring() + L"\"";
+    const HINSTANCE opened = ShellExecuteW(
+        gApp.window,
+        L"open",
+        L"explorer.exe",
+        parameters.c_str(),
+        nullptr,
+        SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+        MessageBoxW(
+            gApp.window,
+            L"Windows Explorer could not open the demo location.",
+            L"Open demo location",
+            MB_OK | MB_ICONWARNING);
+    }
+}
+
+void copySelectedFolderConsoleCommand() {
+    const FolderRunResult* result = selectedFolderRunResult();
+    if (result == nullptr) return;
+    const std::int32_t seekMs = std::max<std::int32_t>(
+        0,
+        result->run.startDemoTimeMs - kPlaybackPrerollMs);
+    std::wostringstream seconds;
+    seconds.setf(std::ios::fixed);
+    seconds.precision(3);
+    seconds << static_cast<double>(seekMs) / 1000.0;
+    const std::filesystem::path absolute =
+        std::filesystem::absolute(result->demo.path).lexically_normal();
+    const std::wstring command =
+        L"set activeAction \"seek " + seconds.str() +
+        L"\"; demo \"" + absolute.generic_wstring() + L"\"";
+    if (copyUnicodeText(command)) {
+        setStatus(
+            L"ETL console command copied — paste it into the open game console "
+            L"to load the demo 5 seconds before the action.");
+    } else {
+        MessageBoxW(
+            gApp.window,
+            L"The ETL console command could not be copied to the clipboard.",
+            L"Clipboard error",
+            MB_OK | MB_ICONWARNING);
+    }
+}
+
+void loadSelectedFolderDemoInMultiKills() {
+    const FolderRunResult* result = selectedFolderRunResult();
+    if (result == nullptr) return;
+    const std::filesystem::path demoPath = result->demo.path;
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(demoPath, error) || error) {
+        MessageBoxW(
+            gApp.window,
+            L"The selected demo file no longer exists.",
+            L"Load demo in Multi-kill finder",
+            MB_OK | MB_ICONWARNING);
+        return;
+    }
+    showTab(0);
+    loadDemo(demoPath);
+}
+
+void showFolderRunContextMenu() {
+    if (selectedFolderRunResult() == nullptr) return;
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) return;
+    AppendMenuW(menu, MF_STRING, kFolderMenuAddRenderQueue, L"Add clip to render queue");
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        kFolderMenuLoadMultiKills,
+        L"Load demo in Multi-kill finder");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kFolderMenuOpenLocation, L"Open demo file location");
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        kFolderMenuCopyConsoleCommand,
+        L"Copy ETL console command (-5s)");
+    POINT position{};
+    GetCursorPos(&position);
+    const UINT selected = TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+        position.x,
+        position.y,
+        0,
+        gApp.window,
+        nullptr);
+    DestroyMenu(menu);
+    if (selected == kFolderMenuAddRenderQueue) {
+        addSelectedFolderRunToRenderQueue();
+    } else if (selected == kFolderMenuLoadMultiKills) {
+        loadSelectedFolderDemoInMultiKills();
+    } else if (selected == kFolderMenuOpenLocation) {
+        openSelectedFolderDemoLocation();
+    } else if (selected == kFolderMenuCopyConsoleCommand) {
+        copySelectedFolderConsoleCommand();
+    }
+}
+
 void playSelectedFolderRun() {
     const int rowIndex = selectedListData(gApp.folderRunList);
     if (rowIndex < 0 || rowIndex >= static_cast<int>(gApp.folderRows.size())) {
@@ -3045,6 +3713,96 @@ void playSelectedFolderRun() {
     playAtPath(
         result.demo.path, result.run.startDemoTimeMs,
         L"folder multi-kill in " + result.demo.path.filename().wstring());
+}
+
+void openClipExporter(const std::vector<etlfrag::ClipSource>& sources) {
+    if (gApp.etlExecutable.empty() || !std::filesystem::is_regular_file(gApp.etlExecutable)) {
+        if (!chooseEtlExecutable()) return;
+    }
+    etlfrag::clipui::open(
+        gApp.window,
+        gApp.etlExecutable,
+        gApp.iniPath,
+        gApp.launchEtlAsAdministrator,
+        gApp.etlHomeFolder,
+        gApp.sourceProfileFolder,
+        gApp.startupConfig,
+        sources);
+}
+
+std::optional<std::size_t> enqueueClipExporter(
+    const std::vector<etlfrag::ClipSource>& sources) {
+    if (gApp.etlExecutable.empty() || !std::filesystem::is_regular_file(gApp.etlExecutable)) {
+        if (!chooseEtlExecutable()) return std::nullopt;
+    }
+    return etlfrag::clipui::enqueue(
+        gApp.window,
+        gApp.etlExecutable,
+        gApp.iniPath,
+        gApp.launchEtlAsAdministrator,
+        gApp.etlHomeFolder,
+        gApp.sourceProfileFolder,
+        gApp.startupConfig,
+        sources);
+}
+
+etlfrag::ClipSource clipSourceForFolderRun(const FolderRunResult& result) {
+    etlfrag::ClipSource source;
+    source.demoPath = result.demo.path;
+    source.label = toWide(result.run.attackerName) + L" " +
+                   std::to_wstring(result.run.killIndices.size()) + L"K";
+    source.actionStartMs = result.run.startDemoTimeMs;
+    source.actionEndMs = result.run.endDemoTimeMs;
+    return source;
+}
+
+void addSelectedFolderRunToRenderQueue() {
+    const FolderRunResult* result = selectedFolderRunResult();
+    if (result == nullptr) return;
+    const std::optional<std::size_t> added =
+        enqueueClipExporter({clipSourceForFolderRun(*result)});
+    if (!added.has_value()) return;
+    if (*added > 0) {
+        setStatus(
+            L"Clip added to the render queue without opening it. Select Render clip queue "
+            L"when you are ready to review or render the collected actions.");
+    } else {
+        setStatus(L"That action is already present in the clip render queue.");
+    }
+}
+
+void renderSelectedRun() {
+    const int runIndex = selectedListData(gApp.runList);
+    if (runIndex < 0 || runIndex >= static_cast<int>(gApp.runs.size())) return;
+    const etlfrag::FragRun& run = gApp.runs[static_cast<std::size_t>(runIndex)];
+    etlfrag::ClipSource source;
+    source.demoPath = gApp.demo.path;
+    source.label = toWide(run.attackerName) + L" " +
+                   std::to_wstring(run.killIndices.size()) + L"K";
+    source.actionStartMs = run.startDemoTimeMs;
+    source.actionEndMs = run.endDemoTimeMs;
+    openClipExporter({source});
+}
+
+void renderSelectedEvent() {
+    const int killIndex = selectedListData(gApp.allEventList);
+    if (killIndex < 0 || killIndex >= static_cast<int>(gApp.demo.kills.size())) return;
+    const etlfrag::KillEvent& kill = gApp.demo.kills[static_cast<std::size_t>(killIndex)];
+    etlfrag::ClipSource source;
+    source.demoPath = gApp.demo.path;
+    source.label = toWide(kill.attackerName) + L" vs " + toWide(kill.targetName);
+    source.actionStartMs = kill.demoTimeMs;
+    source.actionEndMs = kill.demoTimeMs;
+    openClipExporter({source});
+}
+
+void renderSelectedFolderRun() {
+    const int rowIndex = selectedListData(gApp.folderRunList);
+    if (rowIndex < 0 || rowIndex >= static_cast<int>(gApp.folderRows.size())) return;
+    const std::size_t runIndex = gApp.folderRows[static_cast<std::size_t>(rowIndex)];
+    if (runIndex >= gApp.folderRuns.size()) return;
+    const FolderRunResult& result = gApp.folderRuns[runIndex];
+    openClipExporter({clipSourceForFolderRun(result)});
 }
 
 etlfrag::HighlightItem makeHighlight(
@@ -3141,6 +3899,8 @@ void populateHighlightResults() {
     applyListSort(gApp.highlightList, gApp.highlightSort);
     const bool hasHighlights = !gApp.highlights.empty();
     EnableWindow(gApp.playHighlight, hasHighlights);
+    EnableWindow(gApp.renderHighlight, hasHighlights);
+    EnableWindow(gApp.renderAllHighlights, hasHighlights);
     EnableWindow(gApp.removeHighlight, hasHighlights);
     EnableWindow(gApp.clearHighlights, hasHighlights);
     if (hasHighlights) {
@@ -3216,6 +3976,33 @@ void playSelectedHighlight() {
         highlight.demoPath,
         highlight.startDemoTimeMs,
         L"saved highlight in " + highlight.demoPath.filename().wstring());
+}
+
+etlfrag::ClipSource clipSourceForHighlight(const etlfrag::HighlightItem& highlight) {
+    etlfrag::ClipSource source;
+    source.demoPath = highlight.demoPath;
+    source.label = toWide(highlight.povName) + L" " +
+                   std::to_wstring(highlight.events.size()) + L"K";
+    source.actionStartMs = highlight.startDemoTimeMs;
+    source.actionEndMs = highlight.endDemoTimeMs;
+    return source;
+}
+
+void renderSelectedHighlight() {
+    const int highlightIndex = selectedListData(gApp.highlightList);
+    if (highlightIndex < 0 || highlightIndex >= static_cast<int>(gApp.highlights.size())) return;
+    openClipExporter({clipSourceForHighlight(
+        gApp.highlights[static_cast<std::size_t>(highlightIndex)])});
+}
+
+void renderAllHighlights() {
+    if (gApp.highlights.empty()) return;
+    std::vector<etlfrag::ClipSource> sources;
+    sources.reserve(gApp.highlights.size());
+    for (const etlfrag::HighlightItem& highlight : gApp.highlights) {
+        sources.push_back(clipSourceForHighlight(highlight));
+    }
+    openClipExporter(sources);
 }
 
 void removeSelectedHighlight() {
@@ -3761,6 +4548,7 @@ void showTab(int tab) {
              gApp.chooseEtl,
              gApp.playRun,
              gApp.addRunHighlight,
+             gApp.renderRun,
              gApp.runList,
              gApp.runKillList}) {
         setVisible(control, multi);
@@ -3769,6 +4557,7 @@ void showTab(int tab) {
     setVisible(gApp.eventPlayerLabel, events);
     setVisible(gApp.eventPlayer, events);
     setVisible(gApp.playEvent, events);
+    setVisible(gApp.renderEvent, events);
     setVisible(gApp.viewProtocolLog, events);
     for (HWND control : {
              gApp.folderPath,
@@ -3794,6 +4583,7 @@ void showTab(int tab) {
              gApp.folderScan,
              gApp.playFolderRun,
              gApp.addFolderHighlight,
+             gApp.renderFolderRun,
              gApp.folderRunList,
              gApp.folderKillList,
              gApp.folderWatch}) {
@@ -3801,6 +4591,8 @@ void showTab(int tab) {
     }
     for (HWND control : {
              gApp.playHighlight,
+             gApp.renderHighlight,
+             gApp.renderAllHighlights,
              gApp.removeHighlight,
              gApp.clearHighlights,
              gApp.highlightList}) {
@@ -3819,10 +4611,20 @@ void showTab(int tab) {
         setVisible(control, library);
     }
     setVisible(gApp.timeline, !library);
+    setVisible(gApp.renderQueue, multi || folder);
     setVisible(gApp.exportCurrent, true);
     RECT client{};
     GetClientRect(gApp.window, &client);
-    const int timelineY = multi ? scale(380) : (folder ? scale(444) : scale(310));
+    if (multi || folder) {
+        MoveWindow(
+            gApp.renderQueue,
+            static_cast<int>(client.right) - scale(20) - scale(164),
+            scale(376),
+            scale(150),
+            scale(34),
+            TRUE);
+    }
+    const int timelineY = multi ? scale(422) : (folder ? scale(486) : scale(310));
     MoveWindow(
         gApp.timeline,
         scale(30),
@@ -4502,7 +5304,7 @@ void paintWindow(HDC target) {
 
     if (gApp.activeTab == 1) {
         RECT eventTitle{
-            margin + scale(630),
+            margin + scale(820),
             contentTop + scale(16),
             client.right - scale(270),
             contentTop + scale(41)};
@@ -4523,7 +5325,9 @@ void paintWindow(HDC target) {
 
 bool isPrimaryButton(int id) {
     return id == IdOpenDemo || id == IdSearch || id == IdFolderScan ||
-           id == IdExportCurrent || id == IdLibrarySearch;
+           id == IdExportCurrent || id == IdLibrarySearch || id == IdRenderRun ||
+           id == IdRenderEvent || id == IdRenderFolderRun ||
+           id == IdRenderHighlight || id == IdRenderAllHighlights;
 }
 
 void drawOwnerButton(const DRAWITEMSTRUCT& item) {
@@ -4808,11 +5612,13 @@ void recreateDpiResources() {
         }
         for (HWND control : {
                  gApp.openDemo, gApp.tabMultiKills, gApp.tabAllEvents, gApp.tabFolderScan,
-                 gApp.tabHighlights, gApp.tabLibrary, gApp.exportCurrent, gApp.search,
+                 gApp.tabHighlights, gApp.tabLibrary, gApp.exportCurrent, gApp.launchSetup,
+                 gApp.search,
                  gApp.chooseEtl, gApp.playRun, gApp.addRunHighlight, gApp.playEvent,
-                 gApp.viewProtocolLog,
+                 gApp.renderRun, gApp.renderQueue, gApp.renderEvent, gApp.viewProtocolLog,
                  gApp.chooseFolder, gApp.folderApplyFilters, gApp.folderScan,
-                 gApp.playFolderRun, gApp.addFolderHighlight, gApp.playHighlight,
+                 gApp.playFolderRun, gApp.addFolderHighlight, gApp.renderFolderRun,
+                 gApp.playHighlight, gApp.renderHighlight, gApp.renderAllHighlights,
                  gApp.removeHighlight, gApp.clearHighlights, gApp.librarySearch,
                  gApp.libraryOpen}) {
             if (control != nullptr) setFont(control, gApp.labelFont);
@@ -4875,6 +5681,13 @@ void layoutAllControls(int width, int height) {
         scale(235),
         scale(27),
         TRUE);
+    MoveWindow(
+        gApp.launchSetup,
+        width - margin - scale(245) - gap - scale(285),
+        scale(18),
+        scale(285),
+        scale(34),
+        TRUE);
 
     MoveWindow(gApp.demoPath, margin, fileY, width - margin * 2 - openWidth - gap, fileHeight, TRUE);
     MoveWindow(gApp.openDemo, width - margin - openWidth, fileY, openWidth, fileHeight, TRUE);
@@ -4927,6 +5740,13 @@ void layoutAllControls(int width, int height) {
     MoveWindow(gApp.chooseEtl, margin + scale(14), actionY, scale(150), scale(34), TRUE);
     MoveWindow(gApp.playRun, margin + scale(176), actionY, scale(190), scale(34), TRUE);
     MoveWindow(gApp.addRunHighlight, margin + scale(378), actionY, scale(170), scale(34), TRUE);
+    MoveWindow(
+        gApp.renderRun,
+        width - margin - scale(164),
+        actionY,
+        scale(150),
+        scale(34),
+        TRUE);
     const int postDeathX = margin + scale(566);
     MoveWindow(
         gApp.postDeathExplosives,
@@ -4964,7 +5784,7 @@ void layoutAllControls(int width, int height) {
         scale(32),
         TRUE);
 
-    const int listsY = contentTop + scale(198);
+    const int listsY = contentTop + scale(240);
     const int bottom = height - statusHeight - scale(14);
     const int available = std::max(scale(80), bottom - listsY);
     const int runHeight = std::clamp(
@@ -5015,6 +5835,13 @@ void layoutAllControls(int width, int height) {
         margin + scale(395),
         eventActionY,
         scale(220),
+        scale(34),
+        TRUE);
+    MoveWindow(
+        gApp.renderEvent,
+        margin + scale(627),
+        eventActionY,
+        scale(180),
         scale(34),
         TRUE);
     MoveWindow(
@@ -5117,6 +5944,13 @@ void layoutAllControls(int width, int height) {
         scale(175),
         scale(34),
         TRUE);
+    MoveWindow(
+        gApp.renderFolderRun,
+        width - margin - scale(164),
+        actionY,
+        scale(150),
+        scale(34),
+        TRUE);
     const int folderPostDeathX = margin + scale(409);
     MoveWindow(
         gApp.folderPostDeathExplosives,
@@ -5154,8 +5988,8 @@ void layoutAllControls(int width, int height) {
         scale(32),
         TRUE);
     const int folderSearchX = margin + scale(14);
-    const int folderSearchLabelY = contentTop + scale(126);
-    const int folderSearchInputY = contentTop + scale(148);
+    const int folderSearchLabelY = contentTop + scale(168);
+    const int folderSearchInputY = contentTop + scale(190);
     MoveWindow(
         gApp.folderQueryLabel,
         folderSearchX,
@@ -5191,7 +6025,7 @@ void layoutAllControls(int width, int height) {
         scale(196),
         scale(34),
         TRUE);
-    const int folderListsY = contentTop + scale(262);
+    const int folderListsY = contentTop + scale(304);
     const int folderAvailable = std::max(scale(80), bottom - folderListsY);
     const int folderRunHeight = std::clamp(
         folderAvailable * 58 / 100,
@@ -5225,21 +6059,35 @@ void layoutAllControls(int width, int height) {
         gApp.playHighlight,
         margin + scale(14),
         highlightActionY,
-        scale(210),
+        scale(180),
+        scale(34),
+        TRUE);
+    MoveWindow(
+        gApp.renderHighlight,
+        margin + scale(206),
+        highlightActionY,
+        scale(160),
+        scale(34),
+        TRUE);
+    MoveWindow(
+        gApp.renderAllHighlights,
+        margin + scale(378),
+        highlightActionY,
+        scale(185),
         scale(34),
         TRUE);
     MoveWindow(
         gApp.removeHighlight,
-        margin + scale(236),
+        margin + scale(575),
         highlightActionY,
-        scale(175),
+        scale(160),
         scale(34),
         TRUE);
     MoveWindow(
         gApp.clearHighlights,
-        margin + scale(423),
+        margin + scale(747),
         highlightActionY,
-        scale(155),
+        scale(145),
         scale(34),
         TRUE);
     MoveWindow(
@@ -5313,9 +6161,9 @@ void layoutAllControls(int width, int height) {
 
     const int timelineY =
         gApp.activeTab == 0
-            ? contentTop + scale(128)
+            ? contentTop + scale(170)
             : (gApp.activeTab == 2
-                   ? contentTop + scale(192)
+                   ? contentTop + scale(234)
                    : contentTop + scale(58));
     MoveWindow(
         gApp.timeline,
@@ -5401,6 +6249,13 @@ void createInterface(HWND window) {
         L"Launch without seeking",
         BS_OWNERDRAW | WS_TABSTOP,
         IdLaunchWithoutSeeking);
+    gApp.launchSetup = createControl(
+        0,
+        WC_BUTTONW,
+        L"Profile: Default  •  No CFG",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdLaunchSetup,
+        gApp.labelFont);
 
     gApp.playerLabel = createControl(0, WC_STATICW, L"Player", SS_LEFT, IdPlayerLabel, gApp.smallFont);
     gApp.player = createControl(0, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IdPlayer);
@@ -5462,6 +6317,21 @@ void createInterface(HWND window) {
         IdAddRunHighlight,
         gApp.labelFont);
     EnableWindow(gApp.addRunHighlight, FALSE);
+    gApp.renderRun = createControl(
+        0,
+        WC_BUTTONW,
+        L"Render clip",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdRenderRun,
+        gApp.labelFont);
+    EnableWindow(gApp.renderRun, FALSE);
+    gApp.renderQueue = createControl(
+        0,
+        WC_BUTTONW,
+        L"Render clip queue",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdRenderQueue,
+        gApp.labelFont);
 
     const DWORD listStyle = LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS;
     gApp.runList = createControl(0, WC_LISTVIEWW, L"", listStyle, IdRunList);
@@ -5498,6 +6368,14 @@ void createInterface(HWND window) {
     gApp.playEvent = createControl(
         0, WC_BUTTONW, L"Play selected event  (−5s)", BS_OWNERDRAW | WS_TABSTOP, IdPlayEvent, gApp.labelFont);
     EnableWindow(gApp.playEvent, FALSE);
+    gApp.renderEvent = createControl(
+        0,
+        WC_BUTTONW,
+        L"Render event clip",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdRenderEvent,
+        gApp.labelFont);
+    EnableWindow(gApp.renderEvent, FALSE);
     gApp.viewProtocolLog = createControl(
         0,
         WC_BUTTONW,
@@ -5668,6 +6546,14 @@ void createInterface(HWND window) {
         IdAddFolderHighlight,
         gApp.labelFont);
     EnableWindow(gApp.addFolderHighlight, FALSE);
+    gApp.renderFolderRun = createControl(
+        0,
+        WC_BUTTONW,
+        L"Render clip",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdRenderFolderRun,
+        gApp.labelFont);
+    EnableWindow(gApp.renderFolderRun, FALSE);
 
     gApp.folderRunList = createControl(0, WC_LISTVIEWW, L"", listStyle, IdFolderRunList);
     configureListView(gApp.folderRunList);
@@ -5703,6 +6589,20 @@ void createInterface(HWND window) {
         BS_OWNERDRAW | WS_TABSTOP,
         IdPlayHighlight,
         gApp.labelFont);
+    gApp.renderHighlight = createControl(
+        0,
+        WC_BUTTONW,
+        L"Render selected",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdRenderHighlight,
+        gApp.labelFont);
+    gApp.renderAllHighlights = createControl(
+        0,
+        WC_BUTTONW,
+        L"Render entire basket",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdRenderAllHighlights,
+        gApp.labelFont);
     gApp.removeHighlight = createControl(
         0,
         WC_BUTTONW,
@@ -5729,6 +6629,8 @@ void createInterface(HWND window) {
     addListColumn(gApp.highlightList, 7, 80, L"Duration");
     addListColumn(gApp.highlightList, 8, 500, L"Victims and weapons");
     EnableWindow(gApp.playHighlight, FALSE);
+    EnableWindow(gApp.renderHighlight, FALSE);
+    EnableWindow(gApp.renderAllHighlights, FALSE);
     EnableWindow(gApp.removeHighlight, FALSE);
     EnableWindow(gApp.clearHighlights, FALSE);
 
@@ -5831,9 +6733,30 @@ void createInterface(HWND window) {
     gApp.launchWithoutSeeking =
         GetPrivateProfileIntW(
             L"Playback", L"LaunchWithoutSeeking", 0, gApp.iniPath.c_str()) != 0;
+    gApp.etlHomeFolder = defaultEtlHomeFolder();
+    const std::wstring savedProfile = readIniString(L"Playback", L"ProfileFolder");
+    if (!savedProfile.empty()) {
+        std::error_code profileError;
+        if (std::filesystem::is_directory(savedProfile, profileError) && !profileError) {
+            gApp.sourceProfileFolder = std::filesystem::path(savedProfile);
+        }
+    }
+    const std::wstring savedStartupConfig =
+        readIniString(L"Playback", L"StartupConfig");
+    if (savedStartupConfig == L"@destiny") {
+        gApp.startupConfigIsDestiny = true;
+        gApp.startupConfig = destinyConfigPath();
+    } else if (!savedStartupConfig.empty()) {
+        gApp.startupConfig = std::filesystem::path(savedStartupConfig);
+    }
     gApp.folderWatchEnabled =
         GetPrivateProfileIntW(L"Folder", L"AutoIndex", 1, gApp.iniPath.c_str()) != 0;
     findEtlExecutable();
+    refreshEtlProfiles();
+    // Persist the unambiguous user-data setting immediately. This migrates a
+    // stale ClipExport home that pointed at the etl.exe installation while
+    // keeping the executable path as a separate setting.
+    savePlaybackSettings();
     populateFolderWeapons();
     populatePostDeathWindows(gApp.postDeathWindow);
     populatePostDeathWindows(gApp.folderPostDeathWindow);
@@ -6028,6 +6951,9 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                             ? L"Diagnostic playback enabled — demos will start from the beginning without an automatic seek."
                             : L"Automatic playback seek restored — selected actions start five seconds early.");
                     return 0;
+                case IdLaunchSetup:
+                    showEtlLaunchSetupMenu();
+                    return 0;
                 case IdEventPlayer:
                     if (HIWORD(wParam) == CBN_SELCHANGE && gApp.demoLoaded) {
                         populateAllEvents();
@@ -6135,8 +7061,17 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 case IdAddRunHighlight:
                     addSelectedRunToHighlights();
                     return 0;
+                case IdRenderRun:
+                    renderSelectedRun();
+                    return 0;
+                case IdRenderQueue:
+                    openClipExporter({});
+                    return 0;
                 case IdPlayEvent:
                     playSelectedEvent();
+                    return 0;
+                case IdRenderEvent:
+                    renderSelectedEvent();
                     return 0;
                 case IdViewProtocolLog:
                     openProtocolInspector();
@@ -6147,8 +7082,17 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 case IdAddFolderHighlight:
                     addSelectedFolderRunToHighlights();
                     return 0;
+                case IdRenderFolderRun:
+                    renderSelectedFolderRun();
+                    return 0;
                 case IdPlayHighlight:
                     playSelectedHighlight();
+                    return 0;
+                case IdRenderHighlight:
+                    renderSelectedHighlight();
+                    return 0;
+                case IdRenderAllHighlights:
+                    renderAllHighlights();
                     return 0;
                 case IdRemoveHighlight:
                     removeSelectedHighlight();
@@ -6213,12 +7157,27 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 sortListByColumn(notification->hwndFrom, columnClick->iSubItem);
                 return 0;
             }
+            if (notification->idFrom == IdFolderRunList &&
+                notification->code == NM_RCLICK) {
+                const auto* activated = reinterpret_cast<NMITEMACTIVATE*>(lParam);
+                if (activated->iItem >= 0) {
+                    ListView_SetItemState(
+                        gApp.folderRunList,
+                        activated->iItem,
+                        LVIS_SELECTED | LVIS_FOCUSED,
+                        LVIS_SELECTED | LVIS_FOCUSED);
+                    SetFocus(gApp.folderRunList);
+                    showFolderRunContextMenu();
+                }
+                return 0;
+            }
             if (notification->idFrom == IdRunList && notification->code == LVN_ITEMCHANGED) {
                 const auto* changed = reinterpret_cast<NMLISTVIEW*>(lParam);
                 if ((changed->uNewState & LVIS_SELECTED) != 0) {
                     populateRunKillDetails(selectedListData(gApp.runList));
                     EnableWindow(gApp.playRun, TRUE);
                     EnableWindow(gApp.addRunHighlight, TRUE);
+                    EnableWindow(gApp.renderRun, TRUE);
                     InvalidateRect(gApp.timeline, nullptr, FALSE);
                 }
                 return 0;
@@ -6227,6 +7186,7 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 const auto* changed = reinterpret_cast<NMLISTVIEW*>(lParam);
                 if ((changed->uNewState & LVIS_SELECTED) != 0) {
                     EnableWindow(gApp.playEvent, TRUE);
+                    EnableWindow(gApp.renderEvent, TRUE);
                     InvalidateRect(gApp.timeline, nullptr, FALSE);
                 }
                 return 0;
@@ -6238,6 +7198,7 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     const int rowIndex = selectedListData(gApp.folderRunList);
                     populateFolderKillDetails(rowIndex);
                     EnableWindow(gApp.addFolderHighlight, TRUE);
+                    EnableWindow(gApp.renderFolderRun, TRUE);
                     InvalidateRect(gApp.timeline, nullptr, FALSE);
                     if (rowIndex >= 0 &&
                         rowIndex < static_cast<int>(gApp.folderRows.size())) {
@@ -6260,6 +7221,7 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 const auto* changed = reinterpret_cast<NMLISTVIEW*>(lParam);
                 if ((changed->uNewState & LVIS_SELECTED) != 0) {
                     EnableWindow(gApp.playHighlight, TRUE);
+                    EnableWindow(gApp.renderHighlight, TRUE);
                     EnableWindow(gApp.removeHighlight, TRUE);
                     InvalidateRect(gApp.timeline, nullptr, FALSE);
                 }
@@ -6315,6 +7277,7 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             return 0;
         }
         case WM_DESTROY:
+            etlfrag::clipui::shutdown();
             if (gApp.protocolInspector != nullptr) {
                 DestroyWindow(gApp.protocolInspector);
                 gApp.protocolInspector = nullptr;
@@ -6357,7 +7320,7 @@ void enableDarkTitleBar(HWND window) {
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     const HRESULT comInitialization =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     INITCOMMONCONTROLSEX controls{};

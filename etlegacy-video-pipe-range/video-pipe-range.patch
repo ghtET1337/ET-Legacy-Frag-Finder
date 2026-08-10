@@ -1,0 +1,228 @@
+diff --git a/src/qcommon/files.c b/src/qcommon/files.c
+index d36457c..f31b7c0 100644
+--- a/src/qcommon/files.c
++++ b/src/qcommon/files.c
+@@ -329,6 +329,7 @@ typedef struct
+ {
+ 	qfile_ut handleFiles;
+ 	qboolean handleSync;
++	qboolean pipeFile;
+ 	int fileSize;
+ 	int zipFilePos;
+ 	int zipFileLen;
+@@ -1131,7 +1132,18 @@ void FS_FCloseFile(fileHandle_t f)
+ 	// we didn't find it as a pak, so close it as a unique file
+ 	if (fsh[f].handleFiles.file.o)
+ 	{
+-		fclose(fsh[f].handleFiles.file.o);
++		if (fsh[f].pipeFile)
++		{
++#ifdef _WIN32
++			_pclose(fsh[f].handleFiles.file.o);
++#else
++			pclose(fsh[f].handleFiles.file.o);
++#endif
++		}
++		else
++		{
++			fclose(fsh[f].handleFiles.file.o);
++		}
+ 	}
+ 	Com_Memset(&fsh[f], 0, sizeof(fsh[f]));
+ }
+@@ -1309,6 +1321,7 @@ fileHandle_t FS_PipeOpenWrite(const char *cmd, const char *filename)
+ 
+ 	Q_strncpyz(fd->name, filename, sizeof(fd->name));
+ 	fd->handleSync = qfalse;
++	fd->pipeFile   = qtrue;
+ 	fd->zipFile    = qfalse;
+ 
+ 	return f;
+diff --git a/src/client/cl_demo.c b/src/client/cl_demo.c
+index 9d67d1a..0dd6c22 100644
+--- a/src/client/cl_demo.c
++++ b/src/client/cl_demo.c
+@@ -570,6 +570,23 @@ static void CL_DemoSeekMs(double ms, int exactServerTime)  // server time in mil
+ 	}
+ }
+ 
++/**
++ * @brief Seek to a demo-relative time for automated video range capture.
++ * @param[in] seconds Seconds from the first demo snapshot.
++ */
++void CL_DemoSeekSeconds(double seconds)
++{
++	CL_DemoSeekMs((double)di.firstServerTime + seconds * 1000.0, -1);
++}
++
++/**
++ * @return Server time of the first snapshot in the current demo.
++ */
++int CL_DemoFirstServerTime(void)
++{
++	return di.firstServerTime;
++}
++
+ /**
+  * @brief CL_ParseDemoSnapShotSimple
+  * @param[in] msg
+diff --git a/src/client/cl_main.c b/src/client/cl_main.c
+index 28b4bb5..8c114bd 100644
+--- a/src/client/cl_main.c
++++ b/src/client/cl_main.c
+@@ -79,10 +79,14 @@ static void CL_CheckForResend(void);
+ static void CL_ShowIP_f(void);
+ static void CL_ServerStatus_f(void);
+ static void CL_ServerStatusResponse(const netadr_t *from, msg_t *msg);
++static void CL_StopVideo_f(void);
+ 
+ void CL_WavStopRecord_f(void);
+ 
+ qboolean videoPipe;
++static qboolean videoPipeRangeActive;
++static qboolean videoPipeRangeQuit;
++static int      videoPipeRangeEndServerTime;
+ 
+ /**
+  * @brief CL_PurgeCache
+@@ -2426,11 +2430,85 @@ void CL_Video_f(void)
+ 	}
+ }
+ 
++/**
++ * @brief Render an exact demo-relative range through ffmpeg.
++ *
++ * Usage: video-pipe-range <filename> <startTime> <endTime>
++ * Times are seconds from the first demo snapshot. Set
++ * cl_videoPipeRangeQuit to 1 when an external queue controller wants the
++ * client to close after the encoder has flushed the completed clip.
++ */
++static void CL_VideoPipeRange_f(void)
++{
++	char       outputName[MAX_OSPATH];
++	double     startTime;
++	double     endTime;
++	const char *filename;
++	const char *extension;
++
++	if (!clc.demo.playing)
++	{
++		Com_Printf("The video-pipe-range command can only be used when playing back demos\n");
++		return;
++	}
++
++	if (Cmd_Argc() != 4)
++	{
++		Com_Printf("usage: video-pipe-range <filename> <startTime> <endTime>\n");
++		return;
++	}
++
++	filename  = Cmd_Argv(1);
++	startTime = Q_atof(Cmd_Argv(2));
++	endTime   = Q_atof(Cmd_Argv(3));
++	if (!filename[0] || startTime < 0.0 || endTime <= startTime)
++	{
++		Com_Printf("video-pipe-range: filename is required and endTime must be greater than startTime\n");
++		return;
++	}
++
++	if (CL_VideoRecording())
++	{
++		CL_StopVideo_f();
++	}
++
++	CL_DemoSeekSeconds(startTime);
++	videoPipeRangeEndServerTime = CL_DemoFirstServerTime() + (int)(endTime * 1000.0 + 0.5);
++	videoPipeRangeQuit          = Cvar_VariableIntegerValue("cl_videoPipeRangeQuit") != 0;
++	videoPipe                   = qtrue;
++	extension                   = CL_GetVideoExtension();
++	Cvar_Set("cl_avidemotype", "2");
++	if (!Q_stricmp(filename, "$demo"))
++	{
++		Com_sprintf(outputName, sizeof(outputName), "videos/%s.%s", clc.demo.demoName, extension);
++	}
++	else
++	{
++		Com_sprintf(outputName, sizeof(outputName), "videos/%s.%s", filename, extension);
++	}
++	CL_StartVideoRecording(outputName);
++	videoPipeRangeActive = CL_VideoRecording();
++
++	if (videoPipeRangeActive)
++	{
++		Com_Printf("video-pipe-range: rendering %.3f to %.3f seconds as %s\n",
++		           startTime, endTime, filename);
++	}
++	else if (videoPipeRangeQuit)
++	{
++		Cbuf_ExecuteText(EXEC_APPEND, "quit\n");
++	}
++}
++
+ /**
+  * @brief CL_StopVideo_f
+  */
+ static void CL_StopVideo_f(void)
+ {
++	const qboolean quitAfterRange = videoPipeRangeActive && videoPipeRangeQuit;
++
++	videoPipeRangeActive = qfalse;
++	videoPipeRangeQuit   = qfalse;
+ 	Cvar_Set("cl_avidemo", "0");
+ 
+ 	// We need to call something like S_Base_StopAllSounds();
+@@ -2442,6 +2520,11 @@ static void CL_StopVideo_f(void)
+ 	{
+ 		CL_CloseAVI();
+ 	}
++
++	if (quitAfterRange)
++	{
++		Cbuf_ExecuteText(EXEC_APPEND, "quit\n");
++	}
+ }
+ 
+ /**
+@@ -2505,6 +2588,13 @@ static void CL_FrameHandleVideo(int *msec)
+ 	{
+ 		CL_StopVideo_f();
+ 	}
++
++	if (videoPipeRangeActive && CL_VideoRecording() &&
++	    cl.serverTime >= videoPipeRangeEndServerTime)
++	{
++		CL_StopVideo_f();
++		Com_Printf("video-pipe-range: completed\n");
++	}
+ }
+ 
+ /**
+@@ -3212,6 +3302,7 @@ void CL_Init(void)
+ 	// Avi recording
+ 	Cmd_AddCommand("video", CL_Video_f, "Starts AVI recording during demo view.");
+ 	Cmd_AddCommand("video-pipe", CL_Video_f, "Pipe video and audio to ffmpeg for video recording.");
++	Cmd_AddCommand("video-pipe-range", CL_VideoPipeRange_f, "Pipe a demo-relative time range to ffmpeg.");
+ 	Cmd_AddCommand("stopvideo", CL_StopVideo_f, "Stops AVI recording.");
+ 
+ 	Cmd_AddCommand("save_favs", CL_SaveFavServersToFile_f, "Saves the favcache.dat file into mod/profile path of fs_homepath.");
+@@ -3316,6 +3407,7 @@ void CL_Shutdown(void)
+ 	Cmd_RemoveCommand("model");
+ 	Cmd_RemoveCommand("video");
+ 	Cmd_RemoveCommand("video-pipe");
++	Cmd_RemoveCommand("video-pipe-range");
+ 	Cmd_RemoveCommand("stopvideo");
+ 
+ 	Cmd_RemoveCommand("save_favs");
+diff --git a/src/client/client.h b/src/client/client.h
+index f96a346..6a045a7 100644
+--- a/src/client/client.h
++++ b/src/client/client.h
+@@ -519,6 +519,8 @@ void CL_StopRecord_f(void);
+ void CL_DemoRun(void);
+ void CL_DemoInit(void);
+ void CL_DemoShutdown(void);
++void CL_DemoSeekSeconds(double seconds);
++int CL_DemoFirstServerTime(void);
+ 
+ // cl_input
+ 

@@ -1,0 +1,124 @@
+ET: Legacy Frag Finder 1.7.3 by ght
+========================================
+
+Changes:
+
+
+ETL profile and CFG launch control
+----------------------------------
+
+- Fixed the old ETL home setting accepting the installation directory next to
+  etl.exe instead of Windows' user-data fs_homepath. A standard profile tree
+  under Documents\ETLegacy is now detected and migrated automatically.
+- Added a separate persistent ETLegacy/UserDataFolder setting and explicitly
+  passes +set fs_homepath to both normal playback and clip-render processes.
+- Fixed automatic -5s seeking replacing the complete startup prefix. The
+  selected profile, fs_homepath and fs_game now survive before activeAction.
+- Added Use default Documents\ETLegacy to recover the standard path directly.
+- Added a persistent Profile / CFG selector in the main application header.
+- Detects profiles below the selected ETL user-data folder's mod-specific profiles and
+  legacy profile folders, with the source mod shown next to each profile.
+- Playback and rendering now use the exact profile selected by the user.
+  Frag Finder no longer creates or leaves ff_play_* / ff_render_* directories.
+- Added a confirmation-based menu action to remove obsolete ff_play_* and
+  ff_render_* profile directories made by earlier maintenance builds.
+- Added No startup CFG, custom CFG selection and the optional bundled Destiny
+  fragmovie example supplied/modified by Destiny from Israel.
+- A selected CFG is installed directly as the selected profile's etconfig.cfg.
+  The previous file is renamed to
+  etconfigBEFOREfragfinder-YYYYMMDD-HHMMSS.cfg before replacement.
+- CFG replacement uses a temporary file and restores the previous config if
+  installation fails. Identical CFG content does not create duplicate backups.
+- A CFG now requires an explicit profile selection and the profile must belong
+  to the demo's mod. No generated fallback profile is created.
+- Render queue values remain command-line overrides, so requested FPS,
+  resolution, window mode and HUD settings still win over the movie config.
+- Playback/render launch selects the mod inferred from the source demo folder,
+  then restarts the renderer after applying queue-specific display settings.
+- ETL user-data, profile and CFG choices persist in the shared application settings.
+- This is a maintenance update to 1.7.3; executable and manifest version
+  numbering remain unchanged.
+
+Automatic action-to-MP4 rendering
+---------------------------------
+
+- Added Render clip actions for Multi-kill finder, All kills / events,
+  Folder scan and saved Highlights.
+- Added Render entire basket for sequential batch rendering.
+- Added editable pre-roll/post-roll, resolution, custom width/height, FPS,
+  quality and HUD settings.
+- Added Master, High, Balanced and Compact H.264/AAC profiles, queue status,
+  cancellation, MP4 preview, external playback and ffmpeg logs.
+- Rendering uses ETL's internal frames and mixed game audio. The dedicated
+  process is windowed to avoid old id Tech fullscreen capture problems.
+
+Discord-compatible copy
+-----------------------
+
+- Added Create Discord copy (1080p / 60 FPS).
+- The selected main render is preserved unchanged, including a 120 FPS master.
+- A separate *-discord.mp4 uses constant 60 FPS, H.264 High level 4.2,
+  yuv420p, AAC stereo at 48 kHz and MP4 fast-start.
+- A failed or cancelled secondary conversion never deletes or fails the
+  completed master. Its separate ffmpeg log remains in the output folder.
+
+Correct demo-time ranges
+------------------------
+
+- Fixed stock ETL clips stopping after roughly half of the selected action.
+  ETL executes the command buffer twice for every captured frame and both
+  passes decrement wait; Frag Finder now requests two passes per output frame.
+- The selected FPS and timescale 1 are forced after cgame loads. Ranges follow
+  demo progression, never real-world render speed.
+- The reported 1:19.940 to 1:33.860 case now requests all 13.920 seconds:
+  836 output frames at 60 FPS and 1672 command-buffer wait passes.
+- Controller names now clearly distinguish Stock ETL (corrected time) and
+  Patched ETL (exact serverTime).
+
+Playable MP4 finalization
+-------------------------
+
+- Fixed Frag Finder moving a file after ETL closed but before ffmpeg had
+  written its final MP4 index.
+- A completed output must be unlocked and contain top-level ftyp, moov and
+  mdat boxes before it is moved or enabled for preview.
+- The queue displays ETL finished - finalizing MP4 and waits up to two minutes.
+  An incomplete mdat-only file is reported and never marked Completed.
+- The optional ETL engine patch now uses _pclose/pclose so ffmpeg is flushed
+  before the dedicated client exits.
+
+FFmpeg and output reliability
+-----------------------------
+
+- Fixed the ffmpeg output filename being lost when +faststart was interpreted
+  as an id Tech startup-command separator. The safe faststart form is used.
+- ffmpeg.exe is discovered next to etl.exe, next to Frag Finder or through
+  Windows PATH, and can always be selected with Locate ffmpeg.
+- Completed videos and logs are discovered below fs_homepath/fs_game/videos,
+  including the selected home, source-demo mod and ETL installation folders,
+  before being relocated to the chosen output directory.
+- README.md now contains complete FFmpeg installation, verification and
+  troubleshooting instructions.
+
+Folder workflow
+---------------
+
+- Right-click a Folder scan action to add it to the render queue silently,
+  without opening the clip exporter after every selection.
+- Right-click a Folder scan action to load its exact source demo directly in
+  Multi-kill finder and inspect the other actions in that recording.
+- Added Render clip queue below Render clip. It opens the accumulated queue
+  without adding the currently selected action again.
+- Right-click a Folder scan action to open the exact demo in Explorer.
+- Right-click and copy an ETL console command that loads the absolute demo and
+  seeks five seconds before the action through activeAction.
+
+Compatibility
+-------------
+
+- Works with unmodified ET: Legacy 2.83+ through Stock ETL (corrected time).
+- The optional video-pipe-range filename startTime endTime engine patch is
+  included as source for direct serverTime stopping.
+- Existing SQLite indexes, settings, highlights and parser data remain valid.
+- Windows x64 executable, source code, licenses and SHA-256 checksums are
+  included in the release archive.

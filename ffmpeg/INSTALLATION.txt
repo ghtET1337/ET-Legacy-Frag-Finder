@@ -1,0 +1,122 @@
+ET: LEGACY FRAG FINDER - FFMPEG SETUP AND NOTICE
+=================================================
+
+FFmpeg is used by ET: Legacy Frag Finder to encode rendered demo frames and
+game audio into MP4 files. FFmpeg is a separate third-party program and is not
+developed by, endorsed by, or part of ET: Legacy Frag Finder.
+
+
+FILES INCLUDED IN THE FRAG FINDER ZIP
+-------------------------------------
+
+ETL-Frag-Finder-1.7.3-Windows-x64\
+  ETLFragFinder.exe
+  ffmpeg\
+    README-FFMPEG.txt
+    LICENSE or COPYING license files supplied with the FFmpeg build
+    README.txt and other notices supplied with the FFmpeg build
+    bin\
+      ffmpeg.exe
+
+Keep the original license, README, build-information and notice files supplied
+with the downloaded FFmpeg package. Do not include only ffmpeg.exe and discard
+those files.
+
+
+RECOMMENDED INSTALLATION
+------------------------
+
+No system-wide FFmpeg installation is required.
+
+1. Open the "ffmpeg\bin" folder included with Frag Finder. Confirm that this
+   file exists:
+
+     ffmpeg\bin\ffmpeg.exe
+
+2. Find the ET: Legacy installation selected in Frag Finder. This is the
+   installation folder containing etl.exe, not Documents\ETLegacy.
+3. Copy ffmpeg.exe from the package's ffmpeg\bin folder directly into the game
+   installation folder, next to etl.exe.
+
+   Recommended runtime layout:
+
+     <ET: Legacy installation folder>\
+       etl.exe
+       ffmpeg.exe
+
+4. Start ETLFragFinder.exe and select the same etl.exe when asked.
+5. Open an action and select "Render clip", or open "Render clip queue".
+   Frag Finder should automatically detect ffmpeg.exe next to etl.exe.
+6. If the path is not detected, select "Locate ffmpeg" and choose the copied
+   file next to etl.exe. Frag Finder saves this location.
+
+Installing ffmpeg.exe next to etl.exe is the recommended setup for every user.
+It is also the most reliable setup when ET: Legacy must run as administrator,
+because the game does not need a temporary PATH entry or access to another
+application directory.
+
+The ffmpeg folder included in the Frag Finder package should remain intact so
+its upstream license, README, build information and notices stay available.
+
+
+VERIFYING FFMPEG
+----------------
+
+Open Command Prompt in the ET: Legacy installation directory and run:
+
+  ffmpeg.exe -version
+
+The command should print the FFmpeg version, build provider and configuration.
+If running ffmpeg.exe without any encoding arguments ends with "At least one
+output file must be specified", FFmpeg itself started correctly.
+
+
+ADMINISTRATOR MODE
+------------------
+
+Do not run ET: Legacy or Frag Finder as administrator unless the ETL
+installation genuinely requires it. Keeping ffmpeg.exe next to the selected
+etl.exe allows both normal and elevated ETL launches to find the same encoder.
+
+
+TROUBLESHOOTING
+---------------
+
+- "ffmpeg not found": verify that ffmpeg.exe is next to the exact etl.exe
+  selected in Frag Finder, then select that copy with "Locate ffmpeg".
+- "Failed to write avi file": verify the selected path, close any old ETL
+  render process and confirm that Windows Security did not quarantine FFmpeg.
+- Render marked Failed: open the output directory and inspect the matching
+  *.ffmpeg.log.txt file.
+- Incomplete or unplayable MP4: do not terminate ETL or FFmpeg while the queue
+  says that the MP4 is being finalized.
+
+
+THIRD-PARTY LICENSE AND SOURCE
+------------------------------
+
+Recommended package for this application:
+
+  Gyan Windows release essentials build (64-bit, static)
+  https://www.gyan.dev/ffmpeg/builds/
+
+The essentials build contains the codecs required by Frag Finder and is
+smaller than the full build. Gyan identifies its current static Windows builds
+as GPLv3 builds. A build whose configuration includes --enable-gpl must be
+redistributed under the applicable GNU GPL terms. Never redistribute a build
+whose configuration includes --enable-nonfree.
+
+FFmpeg project and source downloads:
+  https://ffmpeg.org/
+  https://ffmpeg.org/download.html
+
+FFmpeg licensing information:
+  https://ffmpeg.org/legal.html
+
+GNU General Public License version 3:
+  https://www.gnu.org/licenses/gpl-3.0.html
+
+The exact bundled FFmpeg version, build configuration and provider can be
+checked with:
+
+  ffmpeg.exe -version
