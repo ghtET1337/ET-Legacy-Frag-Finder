@@ -297,7 +297,7 @@ std::wstring buildRangeAction(
     const ClipRange& range,
     const ClipExportSettings& settings) {
     if (settings.engineMode == ClipEngineMode::NativeVideoPipeRange) {
-        return L"video-pipe-range " + safeBaseName + L" " +
+        return L"seta demo_infoWindow 0; video-pipe-range " + safeBaseName + L" " +
                secondsText(range.startMs) + L" " + secondsText(range.endMs);
     }
     // Stock ETL has no demo-time range command. While video-pipe is active it
@@ -310,7 +310,7 @@ std::wstring buildRangeAction(
     const std::uint64_t waitPasses = std::min<std::uint64_t>(
         static_cast<std::uint64_t>(range.frameCount) * 2ULL,
         static_cast<std::uint64_t>(std::numeric_limits<int>::max()));
-    return L"seek " + secondsText(range.startMs) +
+    return L"seta demo_infoWindow 0; seek " + secondsText(range.startMs) +
            L"; set timescale 1; set cl_aviFrameRate " + std::to_wstring(settings.frameRate) +
            L"; video-pipe " + safeBaseName +
            L"; wait " + std::to_wstring(waitPasses) +
@@ -349,6 +349,7 @@ std::wstring buildEtlClipArguments(
         L" +set com_maxfpsUnfocused " + std::to_wstring(settings.frameRate) +
         L" +set com_maxfpsMinimized " + std::to_wstring(settings.frameRate) +
         L" +set cg_draw2D " + std::wstring(settings.drawHud ? L"1" : L"0") +
+        L" +seta demo_infoWindow 0 "
         L" +set cl_videoPipeRangeQuit 1 "
         L"+vid_restart "
         L"+set activeAction \"" + action + L"\" "

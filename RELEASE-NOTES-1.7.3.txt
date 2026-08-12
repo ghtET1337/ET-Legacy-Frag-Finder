@@ -1,8 +1,38 @@
 ET: Legacy Frag Finder 1.7.3 by ght
 ========================================
 
-Changes:
+Fast Real-Time High-FPS Capture hotfix
+---------------------------------------
 
+- Added Fast capture for normal-speed Desktop Duplication recording with
+  Windows WASAPI system/game audio and global F9 start/stop.
+- The default target is now 250 FPS. Added 240, 250, 300, 360, 480 and 500 FPS
+  shortcuts while keeping an editable 30-1000 FPS target.
+- Fixed NVIDIA NVENC capability detection. The former 128x128 probe could be
+  rejected because its frame dimensions were below an NVIDIA encoder's
+  supported minimum, causing Auto to fall through to Intel Quick Sync. The
+  probe now uses a valid 640x360 frame.
+- Disabled Desktop Duplication filler-frame generation and enabled timestamp
+  passthrough. The output no longer claims a high FPS by repeating an old
+  desktop image when Windows supplied no new frame.
+- Added FFmpeg progress telemetry. A completed capture reports measured FPS,
+  real frame count and reported dropped frames instead of showing only the
+  requested rate.
+- Added dedicated 240+ FPS tuning for NVENC, AMF, Quick Sync and x264. Auto
+  still prefers NVENC, then AMF, Quick Sync and finally software x264.
+- Added a warning before software x264 recording at 250 FPS or above because
+  it is unlikely to keep up with 1080p high-FPS capture on typical CPUs.
+- Capture is written to a recoverable MKV first, stopped cleanly, then remuxed
+  without re-encoding to a fast-start MP4. The MKV and capture log remain if
+  finalization fails.
+- True 250 unique desktop FPS still requires ETL, Windows presentation and the
+  display mode to expose approximately 250 updates per second. Recommended
+  ETL settings are com_maxfps 250+, r_swapInterval 0 and r_fullscreen 0.
+- Sample verification found that the earlier nominal 144 FPS recording held
+  only about 81.5 non-duplicate frames per second and 474 duplicated frames.
+  This hotfix intentionally reports the actual cadence instead of hiding it.
+- Application, manifest and database version remain 1.7.3. No index migration
+  is required.
 
 ETL profile and CFG launch control
 ----------------------------------

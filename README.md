@@ -2,15 +2,27 @@
 
 ET: Legacy Frag Finder is a native Windows tool for indexing demo collections, finding multi-kills, building a clip shortlist and manually reviewing every obituary event stored in ET: Legacy `.dm_84` demos. It reads the binary protocol directly; no server log and no running game client are required for analysis.
 
-## Version 1.7.3
+## Version 1.7.4
 
-This update adds the complete action-to-video workflow. Selected actions and saved highlights can be rendered with ET: Legacy's internal video/audio pipe instead of desktop capture. The queue supports pre-roll, post-roll, resolution, FPS, quality, HUD, cancellation, preview and batch rendering. The corrected stock controller covers the requested **demo-time** range even though offline rendering is slower than real time; the optional patched controller stops directly on demo `serverTime`.
+The current 1.7.4 package includes a Windows startup hotfix. It was rebuilt with the complete C++ runtime initialization path after an earlier maintenance package could close silently before showing the main window. If any later startup exception occurs, Frag Finder now displays an error and writes `%LOCALAPPDATA%\ETLFragFinder\startup.log` instead of failing without feedback.
+
+This 1.7.4 maintenance update adds durable SQLite session recovery without changing the manual **Fast capture** workflow. After a normal close and restart, Frag Finder restores the indexed library view, last demo and folder, active tab, searches, filters, table sorting and main-window position. The existing **Render clip** queue is also stored in SQLite: queued/interrupted work and completed render history remain available until the user removes or clears them. A job that was starting or rendering when the process stopped is returned to **Queued**; missing source demos or output files are retained in the history and clearly marked as failed.
+
+Version 1.7.4 improves **Fast capture** frame pacing. The new default **Smooth constant FPS** mode creates a stable CFR timeline like a conventional game recorder, while **Only new desktop frames (VFR)** remains available for measuring source cadence without repeated pictures. The completion status distinguishes output FPS, approximate source FPS, paced duplicates and dropped frames. High-FPS NVENC settings were also reduced to a lower-overhead P3/no-lookahead path at 250 FPS and above.
+
+The current 1.7.4 safety update displays a dedicated warning before the Fast Capture window opens. It explains that Alt+Tab, switching windows/displays, entering or leaving fullscreen, and changing resolution or refresh rate may invalidate Windows Desktop Duplication and stop FFmpeg with `AcquireNextFrame failed: 887a0026` (`DXGI_ERROR_ACCESS_LOST`). The warning can copy the recommended ETL windowed-mode commands and continue, continue without copying, or cancel. The capture window also provides **Copy ETL windowed commands**. Frag Finder deliberately does not restart or concatenate a recording after this failure, so two demos or actions can never be joined automatically.
+
+**Render Clip** now forces `seta demo_infoWindow 0` both before the demo starts and again through `activeAction` after cgame is active. Before any render queue launches ET: Legacy, a separate warning dialog displays the exact profile, audio, video-pipe, resolution, FPS, HUD and demo commands that Frag Finder will apply. The user must select **Start render queue** or can cancel without opening the game.
+
+Version 1.7.3 introduced the complete action-to-video workflow. Selected actions and saved highlights can be rendered with ET: Legacy's internal video/audio pipe instead of desktop capture. The queue supports pre-roll, post-roll, resolution, FPS, quality, HUD, cancellation, preview and batch rendering. The corrected stock controller covers the requested **demo-time** range even though offline rendering is slower than real time; the optional patched controller stops directly on demo `serverTime`.
 
 Version 1.7.3 also waits for ffmpeg to finish and validates the final MP4 structure before marking a render complete, preventing interrupted `mdat`-only files without a playable `moov` atom. A new optional **Create Discord copy (1080p / 60 FPS)** setting preserves the original master and produces a second broadly compatible H.264/AAC file for Discord's embedded player. Folder results provide a four-command context menu: add an action silently to the render queue, load its source demo in Multi-kill finder, open its file location or copy a ready-to-paste ETL console command. **Render clip queue** opens the accumulated queue without adding the currently selected action.
 
 The 1.7.3 maintenance build adds a persistent **Profile / CFG** selector before demo playback and rendering. Frag Finder now launches the exact profile selected by the user and no longer creates `ff_play_*` or `ff_render_*` profile copies. A selected custom CFG, including the optional cinematic example supplied by Destiny from Israel, is installed as that profile's `etconfig.cfg` after the existing file receives a timestamped backup.
 
 The corrected 1.7.3 build distinguishes the ETL installation folder containing `etl.exe` from ETL's Windows user-data folder (`fs_homepath`). Profiles are detected from the real default location, normally `Documents\ETLegacy\legacy\profiles\<profile>\etconfig.cfg`. Normal −5-second playback preserves `fs_homepath`, `fs_game` and the selected `cl_profile` before `activeAction` and `+demo`.
+
+The high-FPS maintenance work adds **Fast capture**, a real-time Desktop Duplication and WASAPI recorder with game/system audio. Its default target is **250 FPS**, with 240/250/300/360/480/500 shortcuts and any custom value from 30 to 1000 FPS. Encoder probing uses a valid 640×360 test frame, so supported NVIDIA NVENC hardware is not incorrectly rejected.
 
 ## Quick start
 
@@ -21,6 +33,7 @@ The corrected 1.7.3 build distinguishes the ETL installation folder containing `
 5. Select a row and choose **Play selected (−5s)**. On first use, locate your `etl.exe`.
 6. Select **Render clip** to add the action and open the video queue, or use **Render clip queue** to inspect jobs already collected without adding another action. **Add to highlights** saves an action for later batch rendering.
 7. Open **Demo library**, or use the search row in **Folder scan**, to search indexed demos by nickname, map, recording date or filename.
+8. For a fast real-time recording instead of ETL's slower offline video pipe, select **Fast capture**, read the display-safety warning, copy/apply the windowed-mode commands, choose 250 FPS or higher and press **F9** to start or stop.
 
 Double-clicking a multi-kill, individual event or saved highlight starts playback as well. The graphical timeline can be clicked to jump to the nearest row.
 
@@ -69,9 +82,48 @@ Frag Finder explicitly passes `+set fs_homepath`, selects the mod inferred from 
 
 `presets\destiny-fragmovie.cfg` is an optional example supplied/modified by the player Destiny from Israel. It targets a high-quality 2560×1440 cinematic presentation, hides many HUD elements and includes Destiny's own movie-oriented choices. It is not forced, it is not an ET: Legacy default, and users are encouraged to copy and adapt it for their own fragmovie workflow.
 
+## Fast real-time high-FPS capture
+
+Select **Fast capture** in the main window to record the selected Windows display at normal game speed with system/game audio. This is the quick alternative to the frame-by-frame clip renderer. It uses FFmpeg's Direct3D 11 Desktop Duplication source for the picture, Windows WASAPI loopback for the default playback device and H.264/AAC for the final MP4.
+
+The capture window provides:
+
+- an editable **Target FPS** from 30 to 1000, defaulting to 250 FPS;
+- 60, 120, 144, 240, 250, 300, 360, 480 and 500 FPS shortcuts;
+- display selection and optional mouse-cursor capture;
+- system/game audio from the current Windows default output device;
+- automatic encoder selection in the order NVIDIA NVENC, AMD AMF, Intel Quick Sync and software x264;
+- Maximum, High and Balanced quality profiles, with lower-latency encoder settings at 240 FPS and above;
+- **Smooth constant FPS (recommended)** for consistent playback and **Only new desktop frames (VFR)** for source-cadence diagnostics;
+- global **F9** start/stop, a persistent output directory and an FFmpeg log next to every recording;
+- a pre-launch display-safety warning plus **Copy ETL windowed commands**, which copies `r_fullscreen 0; vid_restart` as one pasteable ETL-console line;
+- recording first to recoverable Matroska and then losslessly remuxing to a fast-start MP4;
+- a completion message containing output FPS, approximate source FPS, paced-duplicate count and any reported dropped frames.
+
+For the first 250 FPS test, use these ETL console settings and select **Auto** or **NVIDIA NVENC** with **High quality**:
+
+```text
+/com_maxfps 250
+/r_swapInterval 0
+/r_fullscreen 0
+/vid_restart
+```
+
+Apply the last two commands before starting F9 capture. Once recording has started, avoid Alt+Tab, switching windows or the captured display, entering/leaving fullscreen, and changing display resolution or refresh rate. Any of these transitions may cause FFmpeg `ddagrab` error `887a0026`, because Windows has invalidated the active Desktop Duplication session. If that happens, the recording stops and its recoverable MKV plus capture log are kept. Frag Finder does **not** resume or join the interrupted file with a later recording; the next F9 always starts a separate clip.
+
+**Smooth constant FPS** keeps Desktop Duplication source-faithful, then evenly repeats or drops frames at the final FFmpeg synchronization stage to produce the requested constant-rate timeline. This improves compatibility and perceived pacing in players that handle high-rate VFR poorly. Repeated frames are counted and disclosed; they are not described as new game frames. **Only new desktop frames (VFR)** uses timestamp passthrough and never adds pacing frames, but irregular desktop delivery remains visible and some media players may appear to stutter.
+
+The FPS value is still a request, not a way to create new game motion. 250 *unique* frames per second require ETL, Windows' presentation path and the selected display to expose roughly 250 updates per second. A 60/120/144 Hz desktop normally cannot supply 250 visually different desktop frames, even when ETL internally renders faster. Use a 240/360 Hz display mode for high-speed desktop capture, close overlays, disable V-Sync and verify both the output and approximate source FPS shown after saving.
+
+The earlier 144 FPS build could report a nominal 144 FPS without explaining how many pictures were repeated. It also tested NVENC at 128×128, below the minimum supported dimensions on some NVIDIA hardware, and could silently fall back to a slower encoder. Version 1.7.4 probes at 640×360, makes the pacing policy explicit and reports the duplicate count. If the approximate source result is substantially below the target, verify that a hardware encoder was selected, use **High** rather than Maximum quality and inspect the matching `.capture.log.txt` file.
+
+Software x264 is available as a compatibility fallback but is unlikely to sustain 250+ FPS at 1080p on typical CPUs; the application displays a warning before starting it. Fast capture records the complete selected display and audio until stopped. Use the normal **Render clip** queue when an exact demo-time range, deterministic slow offline rendering or a clean in-engine HUD configuration is more important than capture speed.
+
 ## Automatic clip rendering
 
 Select an action in **Multi-kill finder**, **All kills / events**, **Folder scan** or **Highlights**, then choose its **Render clip** button. The dedicated clip exporter receives the exact demo and action timestamps. **Render entire basket** adds every saved highlight for unattended sequential rendering. In Folder scan, the right-click **Add clip to render queue** command can collect many actions without repeatedly opening the exporter. Select **Render clip queue** below the normal Render clip button at any time to open the existing queue without adding the current selection.
+
+When **Render queue** is selected, version 1.7.4 first opens an ETL command warning. The dialog lists the exact values that will be applied to the dedicated game process and requires explicit confirmation before ETL starts. Cancelling leaves every job queued and does not open the game.
 
 The exporter provides:
 
@@ -83,10 +135,14 @@ The exporter provides:
 - an optional Discord-compatible 1080p constant-60-FPS copy while preserving the original master;
 - a persistent output folder, ETL user-data (`fs_homepath`) folder and ffmpeg location, plus the profile/CFG selection made in the main window;
 - a render queue with per-item status, cancellation, retry-friendly queued items and ffmpeg logs;
+- SQLite-backed queue recovery: queued/interrupted jobs and completed output history survive an application restart;
+- a pre-launch command warning with the complete ETL override list and Continue/Cancel choice;
 - an embedded Windows Media Foundation MP4 preview plus **Open externally**;
 - automatic relocation from ET: Legacy's root or mod-specific `videos` directory to the selected output folder.
 
 Clips are rendered inside ET: Legacy rather than captured from the desktop. This avoids fullscreen/window-capture limitations and sends ETL's internally rendered frames plus its mixed game audio directly to ffmpeg. Frag Finder forces the SDL-compatible sound backend, 16-bit stereo-compatible capture path and disables mute-on-unfocused/minimized for the dedicated render process. Rendering uses the exact selected profile. If a movie CFG is selected, the previous profile config remains available under its timestamped `etconfigBEFOREfragfinder-*` backup name.
+
+Every Render Clip launch executes `seta demo_infoWindow 0` before `vid_restart` and repeats it in the delayed `activeAction` after cgame loads. This prevents ETL's demo information window from appearing in the rendered clip even if the selected profile or startup CFG enabled it. Because `seta` marks the cvar as archived, ETL may retain `demo_infoWindow 0` in the selected profile; the warning dialog states this before launch.
 
 Frag Finder launches a dedicated ETL render instance for each queued clip. That render window closes automatically after `stopvideo` so ffmpeg can flush the MP4 and the next queue item can start; this is expected completion rather than a game crash. ETL normally writes to `fs_homepath/fs_game/videos`, for example `Documents\ETLegacy\legacy\videos`. Frag Finder checks the selected user-data folder, the demo's mod directory, the ETL installation and one-level mod folders before deciding that an MP4 is missing.
 
@@ -153,7 +209,11 @@ This avoids the choppy-looking embedded playback that Discord may show for a loc
 
 ## Persistent demo index
 
-Parsed demo metadata, player sessions, match phase, obituary events and confirmed headshot hits are stored in `demo-index-v3.sqlite3` under `%LOCALAPPDATA%\ETLFragFinder`. SQLite transactions and WAL mode keep the index durable while the folder watcher updates it in the background. The index survives application restarts and is validated against each demo's path, file size, modification timestamp, partial hash and parser revision. Changed files are automatically reparsed even if their size and timestamp were preserved; filter changes never require reparsing. Version 1.7.1 added per-hit data without deleting the existing database, and 1.7.2 reuses that data with the corrected action boundary. Version 1.7.3 keeps the same database and highlight formats, so upgrading does not require another scan.
+Parsed demo metadata, player sessions, match phase, obituary events and confirmed headshot hits are stored in `demo-index-v3.sqlite3` under `%LOCALAPPDATA%\ETLFragFinder`. SQLite transactions and WAL mode keep the index durable while the folder watcher updates it in the background. The index survives application restarts and is validated against each demo's path, file size, modification timestamp, partial hash and parser revision. Changed files are automatically reparsed even if their size and timestamp were preserved; filter changes never require reparsing. Version 1.7.1 added per-hit data without deleting the existing database, and 1.7.2 reuses that data with the corrected action boundary. Version 1.7.4 keeps the same database and highlight formats, so upgrading does not require another scan.
+
+The same SQLite file now contains small `app_state` and namespaced `queue_jobs` tables. They store only UI/session values and render-job metadata; demo payloads remain normalized and are not duplicated in RAM. On restart the application restores the last demo/folder, active tab, Folder scan and Demo library queries, multi-kill filters, player/weapon selections, checkbox options, every table's sort column/direction and the last visible main-window placement. Off-screen saved coordinates are ignored safely if the monitor arrangement has changed.
+
+The normal **Render clip** queue is restored lazily when its window is opened. Jobs left in Starting or Rendering state after an interruption return to Queued so they can be started again; completed rows retain their MP4/log paths and history until **Clear finished** is selected. Missing source demos or moved/deleted output files remain visible with an explanatory Failed status. **Fast capture remains the manual F9 recorder** in this build and is not converted into an automatic action queue.
 
 Each indexed file also receives a partial content hash built from its size plus blocks at the beginning, middle and end. Files with the same size and partial hash are marked as duplicates in **Demo library**. This is fast duplicate detection for managing demo collections, not a cryptographic proof that two files are identical.
 
@@ -232,7 +292,7 @@ The most recent executable, working directory, demo path, launch verb, elevation
 
 ## Supported format
 
-Version 1.7.3 supports protocol 84 used by ET: Legacy 2.84.x. The parser's network structures and enums follow ET: Legacy. A different mod may use incompatible event values even if its demo has the same extension. ETTV `.tv_84` demos are not supported in this release.
+Version 1.7.4 supports protocol 84 used by ET: Legacy 2.84.x. The parser's network structures and enums follow ET: Legacy. A different mod may use incompatible event values even if its demo has the same extension. ETTV `.tv_84` demos are not supported in this release.
 
 The executable is not code-signed, so Windows SmartScreen may warn about a newly downloaded application. Full source code and SHA-256 checksums are included in the release archive.
 

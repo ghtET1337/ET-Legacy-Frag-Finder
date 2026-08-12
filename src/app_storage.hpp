@@ -71,6 +71,43 @@ struct IndexedDemoSummary {
     int parserRevision = 0;
 };
 
+// Small, durable UI/session records stored in the same SQLite database as the
+// demo index. Demo payloads remain normalized in the tables below; these
+// records contain only window state and render-queue metadata.
+struct PersistentQueueJob {
+    std::uint64_t id = 0;
+    int position = 0;
+    std::filesystem::path demoPath;
+    std::wstring label;
+    std::int32_t actionStartMs = 0;
+    std::int32_t actionEndMs = 0;
+    int status = 0;
+    std::wstring detail;
+    std::filesystem::path outputPath;
+    std::filesystem::path logPath;
+};
+
+using PersistentStateValues = std::unordered_map<std::string, std::string>;
+
+bool loadPersistentState(
+    const std::filesystem::path& databasePath,
+    PersistentStateValues& values,
+    std::string& error);
+bool savePersistentState(
+    const std::filesystem::path& databasePath,
+    const PersistentStateValues& values,
+    std::string& error);
+bool loadPersistentQueue(
+    const std::filesystem::path& databasePath,
+    const std::string& queueName,
+    std::vector<PersistentQueueJob>& jobs,
+    std::string& error);
+bool savePersistentQueue(
+    const std::filesystem::path& databasePath,
+    const std::string& queueName,
+    const std::vector<PersistentQueueJob>& jobs,
+    std::string& error);
+
 // SQLite-backed persistent index. Demo payloads stay on disk and are loaded
 // only when a filter, timeline or playback operation needs one specific demo.
 class SqliteDemoIndex {

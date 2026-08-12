@@ -9,7 +9,7 @@ developed by, endorsed by, or part of ET: Legacy Frag Finder.
 FILES INCLUDED IN THE FRAG FINDER ZIP
 -------------------------------------
 
-ETL-Frag-Finder-1.7.3-Windows-x64\
+ETL-Frag-Finder-1.7.4-Windows-x64\
   ETLFragFinder.exe
   ffmpeg\
     README-FFMPEG.txt

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "clip_export.hpp"
+#include "realtime_capture.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -29,6 +30,76 @@ std::string readFile(const std::filesystem::path& path) {
 } // namespace
 
 int main() {
+    etlfrag::RealtimeCaptureSettings realtime;
+    realtime.displayIndex = 1;
+    realtime.frameRate = 250;
+    realtime.drawCursor = false;
+    realtime.captureSystemAudio = true;
+    realtime.quality = etlfrag::RealtimeCaptureQuality::High;
+    realtime.pacing = etlfrag::RealtimeCapturePacing::SmoothCfr;
+    etlfrag::RealtimeAudioInput loopback;
+    loopback.pipeName = L"\\\\.\\pipe\\ETLFragFinderAudio-test";
+    loopback.sampleFormat = L"f32le";
+    loopback.sampleRate = 48000;
+    loopback.channels = 2;
+    const std::wstring realtimeNvenc = etlfrag::buildRealtimeCaptureArguments(
+        realtime,
+        etlfrag::RealtimeCaptureEncoder::NvidiaNvenc,
+        loopback,
+        L"C:/clips/live recording.mkv");
+    check(realtimeNvenc.find(L"ddagrab=output_idx=1") != std::wstring::npos,
+          "real-time capture must use the selected DXGI display");
+    check(realtimeNvenc.find(L"framerate=250:dup_frames=0") != std::wstring::npos,
+          "high-FPS capture must keep the Desktop Duplication source measurable");
+    check(realtimeNvenc.find(L"-r 250 -fps_mode cfr") != std::wstring::npos,
+          "smooth pacing must create a stable 250 FPS output timeline");
+    check(realtimeNvenc.find(L"-c:v h264_nvenc") != std::wstring::npos &&
+              realtimeNvenc.find(L"-preset p3") != std::wstring::npos &&
+              realtimeNvenc.find(L"-rc-lookahead 0 -bf 0") != std::wstring::npos,
+          "250 FPS High quality must use the throughput-tuned NVENC preset");
+    check(realtimeNvenc.find(L"f32le -ar 48000 -ac 2") != std::wstring::npos &&
+              realtimeNvenc.find(L"-c:a aac -b:a 256k") != std::wstring::npos,
+          "real-time capture must include WASAPI loopback audio");
+    check(realtimeNvenc.find(L"-progress pipe:2") != std::wstring::npos,
+          "real-time capture must emit measurable frame statistics");
+    check(realtimeNvenc.find(L"hwdownload") == std::wstring::npos,
+          "NVENC capture should retain Desktop Duplication frames on the GPU");
+    const std::wstring probe = etlfrag::buildRealtimeEncoderProbeArguments(
+        etlfrag::RealtimeCaptureEncoder::NvidiaNvenc);
+    check(probe.find(L"640x360") != std::wstring::npos &&
+              probe.find(L"128x128") == std::wstring::npos,
+          "NVENC probe must not use the unsupported 128x128 test frame");
+    const std::wstring realtimeX264 = etlfrag::buildRealtimeCaptureArguments(
+        realtime,
+        etlfrag::RealtimeCaptureEncoder::SoftwareX264,
+        std::nullopt,
+        L"C:/clips/fallback.mkv");
+    check(realtimeX264.find(L"hwdownload,format=bgra,format=yuv420p") !=
+              std::wstring::npos,
+          "software capture must download D3D11 frames in a compatible format");
+    check(realtimeX264.find(L"-map 0:a:0") == std::wstring::npos,
+          "audio-disabled real-time capture must not map a missing audio input");
+    realtime.pacing = etlfrag::RealtimeCapturePacing::SourceVfr;
+    const std::wstring realtimeVfr = etlfrag::buildRealtimeCaptureArguments(
+        realtime,
+        etlfrag::RealtimeCaptureEncoder::NvidiaNvenc,
+        std::nullopt,
+        L"C:/clips/source-vfr.mkv");
+    check(realtimeVfr.find(L"-fps_mode passthrough") != std::wstring::npos &&
+              realtimeVfr.find(L"-fps_mode cfr") == std::wstring::npos,
+          "source-only pacing must retain Desktop Duplication timestamps");
+    const std::wstring remux = etlfrag::buildRealtimeRemuxArguments(
+        L"C:/clips/fallback.mkv", L"C:/clips/final clip.mp4");
+    check(remux.find(L"-c copy -movflags +faststart") != std::wstring::npos,
+          "real-time recording must remux to MP4 without quality loss");
+    check(etlfrag::isRealtimeDesktopDuplicationLoss(
+              "[Parsed_ddagrab_0] AcquireNextFrame failed: 887a0026\n"
+              "Conversion failed!"),
+          "DXGI access loss must be identified instead of blamed on audio");
+    check(!etlfrag::isRealtimeDesktopDuplicationLoss(
+              "FFmpeg stopped accepting system audio."),
+          "an audio-only failure must not be labeled as a display transition");
+
     etlfrag::ClipSource source;
     source.demoPath = std::filesystem::path(L"C:/demos/test demo.dm_84");
     source.label = L"GOAT/^1ght! 4K";
@@ -52,6 +123,8 @@ int main() {
     check(base.find(L';') == std::wstring::npos, "clip name must be command-safe");
 
     const std::wstring compatible = etlfrag::buildRangeAction(base, range, settings);
+    check(compatible.find(L"seta demo_infoWindow 0;") == 0,
+          "compatible action must hide the demo information window after cgame loads");
     check(compatible.find(L"seek 8.000") != std::wstring::npos,
           "compatible action must seek to the range start");
     check(compatible.find(L"set timescale 1; set cl_aviFrameRate 60; video-pipe") !=
@@ -64,8 +137,8 @@ int main() {
 
     settings.engineMode = etlfrag::ClipEngineMode::NativeVideoPipeRange;
     const std::wstring native = etlfrag::buildRangeAction(base, range, settings);
-    check(native.find(L"video-pipe-range ") == 0,
-          "native action must call video-pipe-range");
+    check(native.find(L"seta demo_infoWindow 0; video-pipe-range ") == 0,
+          "native action must hide demo info and call video-pipe-range");
     check(native.find(L" 8.000 20.250") != std::wstring::npos,
           "native action must pass start and end seconds");
 
@@ -78,6 +151,8 @@ int main() {
           "ffmpeg encoding settings must be passed to ETL");
     check(args.find(L"+set timescale 1") != std::wstring::npos,
           "clip rendering must use normal demo time");
+    check(args.find(L"+seta demo_infoWindow 0") != std::wstring::npos,
+          "clip rendering must force demo_infoWindow off before the demo loads");
     const std::wstring pipeFormat = etlfrag::buildPipeFormat(settings);
     check(pipeFormat.find(L"-movflags faststart") != std::wstring::npos,
           "MP4 fast-start must remain enabled");

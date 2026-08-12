@@ -122,6 +122,101 @@ std::filesystem::path pathFromBytes(const std::string& value) {
 #endif
 }
 
+std::string wideBytes(const std::wstring& wide) {
+    if (wide.empty()) {
+        return {};
+    }
+#if defined(_WIN32)
+    const int count = WideCharToMultiByte(
+        CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    if (count <= 0) {
+        return {};
+    }
+    std::string result(static_cast<std::size_t>(count), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), result.data(), count, nullptr, nullptr);
+    return result;
+#else
+    std::string result;
+    result.reserve(wide.size());
+    for (const wchar_t value : wide) {
+        const std::uint32_t character = static_cast<std::uint32_t>(value);
+        if (character <= 0x7fU) {
+            result.push_back(static_cast<char>(character));
+        } else if (character <= 0x7ffU) {
+            result.push_back(static_cast<char>(0xc0U | (character >> 6U)));
+            result.push_back(static_cast<char>(0x80U | (character & 0x3fU)));
+        } else if (character <= 0xffffU) {
+            result.push_back(static_cast<char>(0xe0U | (character >> 12U)));
+            result.push_back(static_cast<char>(0x80U | ((character >> 6U) & 0x3fU)));
+            result.push_back(static_cast<char>(0x80U | (character & 0x3fU)));
+        } else {
+            result.push_back(static_cast<char>(0xf0U | (character >> 18U)));
+            result.push_back(static_cast<char>(0x80U | ((character >> 12U) & 0x3fU)));
+            result.push_back(static_cast<char>(0x80U | ((character >> 6U) & 0x3fU)));
+            result.push_back(static_cast<char>(0x80U | (character & 0x3fU)));
+        }
+    }
+    return result;
+#endif
+}
+
+std::wstring wideFromBytes(const std::string& value) {
+    if (value.empty()) {
+        return {};
+    }
+#if defined(_WIN32)
+    const int count = MultiByteToWideChar(
+        CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (count <= 0) {
+        return {};
+    }
+    std::wstring result(static_cast<std::size_t>(count), L'\0');
+    MultiByteToWideChar(
+        CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), count);
+    return result;
+#else
+    std::wstring result;
+    for (std::size_t index = 0; index < value.size();) {
+        const auto first = static_cast<unsigned char>(value[index]);
+        std::uint32_t character = 0;
+        std::size_t length = 1;
+        if ((first & 0x80U) == 0U) {
+            character = first;
+        } else if ((first & 0xe0U) == 0xc0U) {
+            character = first & 0x1fU;
+            length = 2;
+        } else if ((first & 0xf0U) == 0xe0U) {
+            character = first & 0x0fU;
+            length = 3;
+        } else if ((first & 0xf8U) == 0xf0U) {
+            character = first & 0x07U;
+            length = 4;
+        } else {
+            ++index;
+            continue;
+        }
+        if (index + length > value.size()) {
+            break;
+        }
+        bool valid = true;
+        for (std::size_t offset = 1; offset < length; ++offset) {
+            const auto continuation = static_cast<unsigned char>(value[index + offset]);
+            if ((continuation & 0xc0U) != 0x80U) {
+                valid = false;
+                break;
+            }
+            character = (character << 6U) | (continuation & 0x3fU);
+        }
+        if (valid) {
+            result.push_back(static_cast<wchar_t>(character));
+        }
+        index += valid ? length : 1;
+    }
+    return result;
+#endif
+}
+
 std::string normalizedPathKey(const std::filesystem::path& input) {
     std::error_code error;
     std::filesystem::path path = std::filesystem::absolute(input, error);
@@ -642,6 +737,69 @@ bool sqliteDone(SqliteStatement& statement, std::string& error) {
     return false;
 }
 
+bool ensurePersistentSchema(sqlite3* database, std::string& error) {
+    return sqliteExec(
+        database,
+        "CREATE TABLE IF NOT EXISTS app_state("
+        "state_key TEXT PRIMARY KEY,"
+        "state_value TEXT NOT NULL,"
+        "updated_unix INTEGER NOT NULL"
+        ");"
+        "CREATE TABLE IF NOT EXISTS queue_jobs("
+        "queue_name TEXT NOT NULL,"
+        "position INTEGER NOT NULL,"
+        "job_id INTEGER NOT NULL,"
+        "demo_path TEXT NOT NULL,"
+        "label TEXT NOT NULL,"
+        "action_start_ms INTEGER NOT NULL,"
+        "action_end_ms INTEGER NOT NULL,"
+        "job_status INTEGER NOT NULL,"
+        "detail TEXT NOT NULL,"
+        "output_path TEXT NOT NULL,"
+        "log_path TEXT NOT NULL,"
+        "PRIMARY KEY(queue_name,position)"
+        ");"
+        "CREATE INDEX IF NOT EXISTS queue_jobs_name_idx "
+        "ON queue_jobs(queue_name,position);",
+        error);
+}
+
+class ScopedSqliteDatabase {
+public:
+    ~ScopedSqliteDatabase() {
+        if (database_ != nullptr) {
+            sqlite3_close_v2(database_);
+        }
+    }
+
+    bool open(const std::filesystem::path& path, std::string& error) {
+        std::error_code directoryError;
+        if (!path.parent_path().empty()) {
+            std::filesystem::create_directories(path.parent_path(), directoryError);
+        }
+        if (directoryError) {
+            error = "Could not create the application data folder: " + directoryError.message();
+            return false;
+        }
+        const std::string bytes = pathBytes(path);
+        if (sqlite3_open_v2(
+                bytes.c_str(),
+                &database_,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                nullptr) != SQLITE_OK) {
+            error = database_ != nullptr ? sqlite3_errmsg(database_) : "Could not open SQLite state.";
+            return false;
+        }
+        sqlite3_busy_timeout(database_, 5000);
+        return ensurePersistentSchema(database_, error);
+    }
+
+    sqlite3* get() const noexcept { return database_; }
+
+private:
+    sqlite3* database_ = nullptr;
+};
+
 std::string folderPrefixKey(const std::filesystem::path& input) {
     std::error_code error;
     std::filesystem::path folder = std::filesystem::absolute(input, error);
@@ -918,6 +1076,10 @@ bool SqliteDemoIndex::open(const std::filesystem::path& path, std::string& error
         ");"
         ;
     if (!sqliteExec(database_, schema, error)) {
+        close();
+        return false;
+    }
+    if (!ensurePersistentSchema(database_, error)) {
         close();
         return false;
     }
@@ -1576,6 +1738,204 @@ bool SqliteDemoIndex::importLegacyIndex(
         }
         ++imported;
     }
+    return true;
+}
+
+bool loadPersistentState(
+    const std::filesystem::path& databasePath,
+    PersistentStateValues& values,
+    std::string& error) {
+    values.clear();
+    error.clear();
+    ScopedSqliteDatabase database;
+    if (!database.open(databasePath, error)) {
+        return false;
+    }
+    SqliteStatement statement(
+        database.get(),
+        "SELECT state_key,state_value FROM app_state;",
+        error);
+    if (!statement) {
+        return false;
+    }
+    for (;;) {
+        const int result = sqlite3_step(statement.get());
+        if (result == SQLITE_DONE) {
+            return true;
+        }
+        if (result != SQLITE_ROW) {
+            error = sqlite3_errmsg(database.get());
+            values.clear();
+            return false;
+        }
+        values[sqliteText(statement.get(), 0)] = sqliteText(statement.get(), 1);
+    }
+}
+
+bool savePersistentState(
+    const std::filesystem::path& databasePath,
+    const PersistentStateValues& values,
+    std::string& error) {
+    error.clear();
+    ScopedSqliteDatabase database;
+    if (!database.open(databasePath, error)) {
+        return false;
+    }
+    if (!sqliteExec(database.get(), "BEGIN IMMEDIATE;", error)) {
+        return false;
+    }
+    bool committed = false;
+    auto rollback = [&]() {
+        if (!committed) {
+            std::string ignored;
+            sqliteExec(database.get(), "ROLLBACK;", ignored);
+        }
+    };
+    SqliteStatement statement(
+        database.get(),
+        "INSERT INTO app_state(state_key,state_value,updated_unix) "
+        "VALUES(?1,?2,?3) ON CONFLICT(state_key) DO UPDATE SET "
+        "state_value=excluded.state_value,updated_unix=excluded.updated_unix;",
+        error);
+    if (!statement) {
+        rollback();
+        return false;
+    }
+    const auto now = static_cast<sqlite3_int64>(std::time(nullptr));
+    for (const auto& [key, value] : values) {
+        sqlite3_reset(statement.get());
+        sqlite3_clear_bindings(statement.get());
+        if (!bindText(statement.get(), 1, key) ||
+            !bindText(statement.get(), 2, value) ||
+            sqlite3_bind_int64(statement.get(), 3, now) != SQLITE_OK ||
+            !sqliteDone(statement, error)) {
+            rollback();
+            return false;
+        }
+    }
+    if (!sqliteExec(database.get(), "COMMIT;", error)) {
+        rollback();
+        return false;
+    }
+    committed = true;
+    return true;
+}
+
+bool loadPersistentQueue(
+    const std::filesystem::path& databasePath,
+    const std::string& queueName,
+    std::vector<PersistentQueueJob>& jobs,
+    std::string& error) {
+    jobs.clear();
+    error.clear();
+    ScopedSqliteDatabase database;
+    if (!database.open(databasePath, error)) {
+        return false;
+    }
+    SqliteStatement statement(
+        database.get(),
+        "SELECT position,job_id,demo_path,label,action_start_ms,action_end_ms,"
+        "job_status,detail,output_path,log_path FROM queue_jobs "
+        "WHERE queue_name=?1 ORDER BY position;",
+        error);
+    if (!statement || !bindText(statement.get(), 1, queueName)) {
+        if (error.empty()) {
+            error = sqlite3_errmsg(database.get());
+        }
+        return false;
+    }
+    for (;;) {
+        const int result = sqlite3_step(statement.get());
+        if (result == SQLITE_DONE) {
+            return true;
+        }
+        if (result != SQLITE_ROW) {
+            error = sqlite3_errmsg(database.get());
+            jobs.clear();
+            return false;
+        }
+        PersistentQueueJob job;
+        job.position = sqlite3_column_int(statement.get(), 0);
+        job.id = static_cast<std::uint64_t>(sqlite3_column_int64(statement.get(), 1));
+        job.demoPath = pathFromBytes(sqliteText(statement.get(), 2));
+        job.label = wideFromBytes(sqliteText(statement.get(), 3));
+        job.actionStartMs = sqlite3_column_int(statement.get(), 4);
+        job.actionEndMs = sqlite3_column_int(statement.get(), 5);
+        job.status = sqlite3_column_int(statement.get(), 6);
+        job.detail = wideFromBytes(sqliteText(statement.get(), 7));
+        job.outputPath = pathFromBytes(sqliteText(statement.get(), 8));
+        job.logPath = pathFromBytes(sqliteText(statement.get(), 9));
+        jobs.push_back(std::move(job));
+    }
+}
+
+bool savePersistentQueue(
+    const std::filesystem::path& databasePath,
+    const std::string& queueName,
+    const std::vector<PersistentQueueJob>& jobs,
+    std::string& error) {
+    error.clear();
+    ScopedSqliteDatabase database;
+    if (!database.open(databasePath, error)) {
+        return false;
+    }
+    if (!sqliteExec(database.get(), "BEGIN IMMEDIATE;", error)) {
+        return false;
+    }
+    bool committed = false;
+    auto rollback = [&]() {
+        if (!committed) {
+            std::string ignored;
+            sqliteExec(database.get(), "ROLLBACK;", ignored);
+        }
+    };
+    SqliteStatement deletion(
+        database.get(), "DELETE FROM queue_jobs WHERE queue_name=?1;", error);
+    if (!deletion || !bindText(deletion.get(), 1, queueName) || !sqliteDone(deletion, error)) {
+        rollback();
+        return false;
+    }
+    SqliteStatement insertion(
+        database.get(),
+        "INSERT INTO queue_jobs(queue_name,position,job_id,demo_path,label,"
+        "action_start_ms,action_end_ms,job_status,detail,output_path,log_path) "
+        "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11);",
+        error);
+    if (!insertion) {
+        rollback();
+        return false;
+    }
+    for (std::size_t index = 0; index < jobs.size(); ++index) {
+        const PersistentQueueJob& job = jobs[index];
+        sqlite3_reset(insertion.get());
+        sqlite3_clear_bindings(insertion.get());
+        const int position = job.position >= 0 ? job.position : static_cast<int>(index);
+        const bool bound =
+            bindText(insertion.get(), 1, queueName) &&
+            sqlite3_bind_int(insertion.get(), 2, position) == SQLITE_OK &&
+            sqlite3_bind_int64(
+                insertion.get(), 3, static_cast<sqlite3_int64>(job.id)) == SQLITE_OK &&
+            bindText(insertion.get(), 4, pathBytes(job.demoPath)) &&
+            bindText(insertion.get(), 5, wideBytes(job.label)) &&
+            sqlite3_bind_int(insertion.get(), 6, job.actionStartMs) == SQLITE_OK &&
+            sqlite3_bind_int(insertion.get(), 7, job.actionEndMs) == SQLITE_OK &&
+            sqlite3_bind_int(insertion.get(), 8, job.status) == SQLITE_OK &&
+            bindText(insertion.get(), 9, wideBytes(job.detail)) &&
+            bindText(insertion.get(), 10, pathBytes(job.outputPath)) &&
+            bindText(insertion.get(), 11, pathBytes(job.logPath));
+        if (!bound || !sqliteDone(insertion, error)) {
+            if (error.empty()) {
+                error = sqlite3_errmsg(database.get());
+            }
+            rollback();
+            return false;
+        }
+    }
+    if (!sqliteExec(database.get(), "COMMIT;", error)) {
+        rollback();
+        return false;
+    }
+    committed = true;
     return true;
 }
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ETLFragFinder VERSION 1.7.3 LANGUAGES C CXX)
+project(ETLFragFinder VERSION 1.7.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,7 @@ add_library(etl_demo_parser STATIC
     src/idtech3_huffman.cpp
     src/app_storage.cpp
     src/clip_export.cpp
+    src/realtime_capture.cpp
 )
 target_include_directories(etl_demo_parser PUBLIC src)
 target_link_libraries(etl_demo_parser PUBLIC etl_sqlite)
@@ -43,6 +44,7 @@ if(WIN32)
         ETLFragFinder WIN32
         src/win_main.cpp
         src/clip_export_window.cpp
+        src/realtime_capture_window.cpp
         src/app.rc)
     target_link_libraries(
         ETLFragFinder PRIVATE etl_demo_parser comctl32 comdlg32 shell32 ole32 uuid

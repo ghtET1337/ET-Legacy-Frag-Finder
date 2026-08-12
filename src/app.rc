@@ -2,8 +2,8 @@
 101 ICON "app.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,7,3,0
- PRODUCTVERSION 1,7,3,0
+ FILEVERSION 1,7,4,0
+ PRODUCTVERSION 1,7,4,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -16,11 +16,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "ght\0"
             VALUE "FileDescription", "ET: Legacy Frag Finder by ght\0"
-            VALUE "FileVersion", "1.7.3\0"
+            VALUE "FileVersion", "1.7.4\0"
             VALUE "InternalName", "ETLFragFinder\0"
             VALUE "OriginalFilename", "ETLFragFinder.exe\0"
             VALUE "ProductName", "ET: Legacy Frag Finder by ght\0"
-            VALUE "ProductVersion", "1.7.3\0"
+            VALUE "ProductVersion", "1.7.4\0"
         END
     END
     BLOCK "VarFileInfo"

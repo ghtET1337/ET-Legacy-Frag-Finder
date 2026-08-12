@@ -493,6 +493,64 @@ int main() {
     assert(sqliteIndex.size(storageError) == 1);
     sqliteIndex.close();
 
+    etlfrag::PersistentStateValues savedState{
+        {"ui.active_tab", "2"},
+        {"ui.last_demo", demoPath.string()},
+        {"folder.query", "storage_test"},
+        {"sort.folder_runs.column", "5"},
+        {"sort.folder_runs.ascending", "0"},
+    };
+    assert(etlfrag::savePersistentState(sqlitePath, savedState, storageError));
+    etlfrag::PersistentStateValues restoredState;
+    assert(etlfrag::loadPersistentState(sqlitePath, restoredState, storageError));
+    assert(restoredState == savedState);
+
+    etlfrag::PersistentQueueJob interruptedJob;
+    interruptedJob.id = 1001;
+    interruptedJob.position = 0;
+    interruptedJob.demoPath = demoPath;
+    interruptedJob.label = L"Player 3K";
+    interruptedJob.actionStartMs = 12000;
+    interruptedJob.actionEndMs = 15000;
+    interruptedJob.status = 2;
+    interruptedJob.detail = L"Rendering";
+
+    etlfrag::PersistentQueueJob completedJob = interruptedJob;
+    completedJob.id = 1002;
+    completedJob.position = 1;
+    completedJob.status = 3;
+    completedJob.detail = L"Completed";
+    completedJob.outputPath = storageFolder / "finished.mp4";
+    completedJob.logPath = storageFolder / "finished.log.txt";
+    assert(etlfrag::savePersistentQueue(
+        sqlitePath, "offline-render", {interruptedJob, completedJob}, storageError));
+
+    etlfrag::PersistentQueueJob independentJob = interruptedJob;
+    independentJob.id = 2001;
+    independentJob.position = 0;
+    assert(etlfrag::savePersistentQueue(
+        sqlitePath, "independent-test-queue", {independentJob}, storageError));
+
+    std::vector<etlfrag::PersistentQueueJob> restoredQueue;
+    assert(etlfrag::loadPersistentQueue(
+        sqlitePath, "offline-render", restoredQueue, storageError));
+    assert(restoredQueue.size() == 2);
+    assert(restoredQueue[0].id == interruptedJob.id);
+    assert(restoredQueue[0].label == interruptedJob.label);
+    assert(restoredQueue[0].status == interruptedJob.status);
+    assert(restoredQueue[1].id == completedJob.id);
+    assert(restoredQueue[1].outputPath == completedJob.outputPath);
+    assert(restoredQueue[1].logPath == completedJob.logPath);
+
+    assert(etlfrag::savePersistentQueue(
+        sqlitePath, "offline-render", {}, storageError));
+    assert(etlfrag::loadPersistentQueue(
+        sqlitePath, "offline-render", restoredQueue, storageError));
+    assert(restoredQueue.empty());
+    assert(etlfrag::loadPersistentQueue(
+        sqlitePath, "independent-test-queue", restoredQueue, storageError));
+    assert(restoredQueue.size() == 1 && restoredQueue.front().id == independentJob.id);
+
     etlfrag::HighlightItem savedHighlight;
     savedHighlight.demoPath = demoPath;
     savedHighlight.mapName = "storage_test";

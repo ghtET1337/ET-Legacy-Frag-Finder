@@ -2,6 +2,7 @@
 #include "etl_demo_parser.hpp"
 #include "app_storage.hpp"
 #include "clip_export_window.hpp"
+#include "realtime_capture_window.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -86,6 +87,7 @@ enum ControlId {
     IdTabHighlights,
     IdTabLibrary,
     IdExportCurrent,
+    IdFastCapture,
     IdLaunchAsAdministrator,
     IdLaunchWithoutSeeking,
     IdLaunchSetup,
@@ -256,6 +258,7 @@ struct AppState {
     HWND tabHighlights = nullptr;
     HWND tabLibrary = nullptr;
     HWND exportCurrent = nullptr;
+    HWND fastCapture = nullptr;
     HWND launchAsAdministrator = nullptr;
     HWND launchWithoutSeekingControl = nullptr;
     HWND launchSetup = nullptr;
@@ -407,6 +410,7 @@ struct AppState {
     std::filesystem::path dataFolder;
     std::filesystem::path indexPath;
     std::filesystem::path highlightsPath;
+    etlfrag::PersistentStateValues sessionState;
     HWND protocolInspector = nullptr;
 };
 
@@ -423,6 +427,7 @@ LRESULT CALLBACK timelineProcedure(HWND window, UINT message, WPARAM wParam, LPA
 LRESULT CALLBACK protocolInspectorProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
 void updateWindowTitle();
 void showTab(int tab);
+void searchRuns();
 void searchLibrary(bool reportStatus);
 etlfrag::DemoSearchField selectedSearchField(HWND fieldControl);
 void addSelectedFolderRunToRenderQueue();
@@ -978,6 +983,51 @@ std::filesystem::path applicationDataFolder() {
     return modulePath().parent_path() / L"data";
 }
 
+void appendStartupLog(const std::wstring& message) noexcept {
+    try {
+        const std::filesystem::path folder = applicationDataFolder();
+        std::error_code folderError;
+        std::filesystem::create_directories(folder, folderError);
+        if (folderError) {
+            return;
+        }
+
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        std::wofstream stream(folder / L"startup.log", std::ios::app);
+        if (!stream) {
+            return;
+        }
+        stream << std::setfill(L'0')
+               << L'[' << std::setw(4) << now.wYear << L'-'
+               << std::setw(2) << now.wMonth << L'-'
+               << std::setw(2) << now.wDay << L' '
+               << std::setw(2) << now.wHour << L':'
+               << std::setw(2) << now.wMinute << L':'
+               << std::setw(2) << now.wSecond << L"] "
+               << message << L'\n';
+    } catch (...) {
+        // Startup diagnostics must never become another startup failure.
+    }
+}
+
+void reportStartupFailure(HWND owner, const std::wstring& detail) noexcept {
+    try {
+        appendStartupLog(L"Startup failed: " + detail);
+        const std::wstring message =
+            L"ET: Legacy Frag Finder could not start.\n\n" + detail +
+            L"\n\nA diagnostic log was written to:\n" +
+            (applicationDataFolder() / L"startup.log").wstring();
+        MessageBoxW(owner, message.c_str(), L"ET: Legacy Frag Finder", MB_OK | MB_ICONERROR);
+    } catch (...) {
+        MessageBoxW(
+            owner,
+            L"ET: Legacy Frag Finder could not start.",
+            L"ET: Legacy Frag Finder",
+            MB_OK | MB_ICONERROR);
+    }
+}
+
 void initializePersistentStorage() {
     gApp.dataFolder = applicationDataFolder();
     gApp.iniPath = gApp.dataFolder / L"settings.ini";
@@ -1008,6 +1058,11 @@ void initializePersistentStorage() {
         std::string sizeError;
         const std::size_t indexed = gApp.demoIndex.size(sizeError);
         if (sizeError.empty()) gApp.indexedDemoCount = indexed;
+    }
+
+    std::string sessionError;
+    if (!etlfrag::loadPersistentState(gApp.indexPath, gApp.sessionState, sessionError)) {
+        gApp.sessionState.clear();
     }
 
     std::string highlightError;
@@ -2711,6 +2766,206 @@ std::wstring controlText(HWND control) {
     return value;
 }
 
+std::string sessionValue(const char* key, const std::string& fallback = {}) {
+    const auto found = gApp.sessionState.find(key);
+    return found != gApp.sessionState.end() ? found->second : fallback;
+}
+
+int sessionInteger(const char* key, int fallback, int minimum, int maximum) {
+    const std::string value = sessionValue(key);
+    if (value.empty()) {
+        return fallback;
+    }
+    try {
+        std::size_t consumed = 0;
+        const long parsed = std::stol(value, &consumed);
+        if (consumed != value.size()) {
+            return fallback;
+        }
+        if (parsed < static_cast<long>(minimum)) {
+            return minimum;
+        }
+        if (parsed > static_cast<long>(maximum)) {
+            return maximum;
+        }
+        return static_cast<int>(parsed);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+bool sessionBoolean(const char* key, bool fallback) {
+    const std::string value = sessionValue(key);
+    if (value == "1" || value == "true") {
+        return true;
+    }
+    if (value == "0" || value == "false") {
+        return false;
+    }
+    return fallback;
+}
+
+void restoreControlText(HWND control, const char* key) {
+    const std::string value = sessionValue(key);
+    if (!value.empty()) {
+        SetWindowTextW(control, toWide(value).c_str());
+    }
+}
+
+void restoreComboIndex(HWND control, const char* key) {
+    const int count = static_cast<int>(SendMessageW(control, CB_GETCOUNT, 0, 0));
+    if (count <= 0) {
+        return;
+    }
+    const int selection = sessionInteger(key, 0, 0, count - 1);
+    SendMessageW(control, CB_SETCURSEL, selection, 0);
+}
+
+void restoreComboText(HWND control, const char* key) {
+    const std::wstring value = toWide(sessionValue(key));
+    if (value.empty()) {
+        return;
+    }
+    const LRESULT found = SendMessageW(
+        control,
+        CB_FINDSTRINGEXACT,
+        static_cast<WPARAM>(-1),
+        reinterpret_cast<LPARAM>(value.c_str()));
+    if (found != CB_ERR) {
+        SendMessageW(control, CB_SETCURSEL, found, 0);
+    }
+}
+
+void restoreSortState(ListSortState& sort, const char* columnKey, const char* orderKey) {
+    sort.column = sessionInteger(columnKey, sort.column, -1, 32);
+    sort.ascending = sessionBoolean(orderKey, sort.ascending);
+}
+
+void restoreSessionControls() {
+    restoreControlText(gApp.minimumKills, "multi.minimum_kills");
+    restoreControlText(gApp.minimumHeadshots, "multi.minimum_headshots");
+    restoreControlText(gApp.maximumGap, "multi.maximum_gap");
+    restoreControlText(gApp.postDeathWindow, "multi.post_death_window");
+    gApp.includeTeamKills = sessionBoolean("multi.include_teamkills", false);
+    gApp.includeWarmupKills = sessionBoolean("multi.include_warmup", false);
+    gApp.postDeathExplosivesEnabled = sessionBoolean("multi.post_death_enabled", false);
+
+    restoreControlText(gApp.folderMinimumKills, "folder.minimum_kills");
+    restoreControlText(gApp.folderMinimumHeadshots, "folder.minimum_headshots");
+    restoreControlText(gApp.folderMaximumGap, "folder.maximum_gap");
+    restoreControlText(gApp.folderPostDeathWindow, "folder.post_death_window");
+    restoreControlText(gApp.folderQuery, "folder.query");
+    restoreComboIndex(gApp.folderField, "folder.field");
+    restoreComboText(gApp.folderWeapon, "folder.weapon");
+    gApp.folderIncludeTeamKills = sessionBoolean("folder.include_teamkills", false);
+    gApp.folderIncludeWarmupKills = sessionBoolean("folder.include_warmup", false);
+    gApp.folderPostDeathExplosivesEnabled =
+        sessionBoolean("folder.post_death_enabled", false);
+    gApp.folderWatchEnabled =
+        sessionBoolean("folder.auto_index", gApp.folderWatchEnabled);
+
+    restoreControlText(gApp.libraryQuery, "library.query");
+    restoreComboIndex(gApp.libraryField, "library.field");
+    gApp.libraryFolderOnly = sessionBoolean("library.folder_only", false);
+    gApp.libraryDuplicatesOnly = sessionBoolean("library.duplicates_only", false);
+
+    restoreSortState(gApp.runSort, "sort.runs.column", "sort.runs.ascending");
+    restoreSortState(gApp.runKillSort, "sort.run_kills.column", "sort.run_kills.ascending");
+    restoreSortState(gApp.allEventSort, "sort.events.column", "sort.events.ascending");
+    restoreSortState(gApp.folderRunSort, "sort.folder_runs.column", "sort.folder_runs.ascending");
+    restoreSortState(gApp.folderKillSort, "sort.folder_kills.column", "sort.folder_kills.ascending");
+    restoreSortState(gApp.highlightSort, "sort.highlights.column", "sort.highlights.ascending");
+    restoreSortState(gApp.librarySort, "sort.library.column", "sort.library.ascending");
+}
+
+void restoreDemoSessionSelections() {
+    if (!gApp.demoLoaded) {
+        return;
+    }
+    restoreComboText(gApp.player, "multi.player");
+    restoreComboText(gApp.weapon, "multi.weapon");
+    restoreComboText(gApp.eventPlayer, "events.player");
+    populateAllEvents();
+    searchRuns();
+}
+
+std::string comboTextUtf8(HWND control) {
+    return toUtf8(controlText(control));
+}
+
+void saveSortState(
+    etlfrag::PersistentStateValues& values,
+    const ListSortState& sort,
+    const char* columnKey,
+    const char* orderKey) {
+    values[columnKey] = std::to_string(sort.column);
+    values[orderKey] = sort.ascending ? "1" : "0";
+}
+
+void saveSessionState() {
+    if (gApp.indexPath.empty()) {
+        return;
+    }
+    etlfrag::PersistentStateValues values;
+    values["ui.active_tab"] = std::to_string(gApp.activeTab);
+    values["ui.last_demo"] = gApp.demoLoaded ? toUtf8(gApp.demo.path.wstring()) : "";
+    values["ui.folder"] = toUtf8(gApp.demoFolder.wstring());
+
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    if (gApp.window != nullptr && GetWindowPlacement(gApp.window, &placement)) {
+        values["ui.window.left"] = std::to_string(placement.rcNormalPosition.left);
+        values["ui.window.top"] = std::to_string(placement.rcNormalPosition.top);
+        values["ui.window.right"] = std::to_string(placement.rcNormalPosition.right);
+        values["ui.window.bottom"] = std::to_string(placement.rcNormalPosition.bottom);
+        values["ui.window.maximized"] = placement.showCmd == SW_SHOWMAXIMIZED ? "1" : "0";
+    }
+
+    values["multi.minimum_kills"] = toUtf8(controlText(gApp.minimumKills));
+    values["multi.minimum_headshots"] = toUtf8(controlText(gApp.minimumHeadshots));
+    values["multi.maximum_gap"] = toUtf8(controlText(gApp.maximumGap));
+    values["multi.post_death_window"] = toUtf8(controlText(gApp.postDeathWindow));
+    values["multi.player"] = comboTextUtf8(gApp.player);
+    values["multi.weapon"] = comboTextUtf8(gApp.weapon);
+    values["multi.include_teamkills"] = gApp.includeTeamKills ? "1" : "0";
+    values["multi.include_warmup"] = gApp.includeWarmupKills ? "1" : "0";
+    values["multi.post_death_enabled"] = gApp.postDeathExplosivesEnabled ? "1" : "0";
+    values["events.player"] = comboTextUtf8(gApp.eventPlayer);
+
+    values["folder.minimum_kills"] = toUtf8(controlText(gApp.folderMinimumKills));
+    values["folder.minimum_headshots"] = toUtf8(controlText(gApp.folderMinimumHeadshots));
+    values["folder.maximum_gap"] = toUtf8(controlText(gApp.folderMaximumGap));
+    values["folder.post_death_window"] = toUtf8(controlText(gApp.folderPostDeathWindow));
+    values["folder.query"] = toUtf8(controlText(gApp.folderQuery));
+    values["folder.field"] = std::to_string(
+        static_cast<int>(SendMessageW(gApp.folderField, CB_GETCURSEL, 0, 0)));
+    values["folder.weapon"] = comboTextUtf8(gApp.folderWeapon);
+    values["folder.include_teamkills"] = gApp.folderIncludeTeamKills ? "1" : "0";
+    values["folder.include_warmup"] = gApp.folderIncludeWarmupKills ? "1" : "0";
+    values["folder.post_death_enabled"] =
+        gApp.folderPostDeathExplosivesEnabled ? "1" : "0";
+    values["folder.auto_index"] = gApp.folderWatchEnabled ? "1" : "0";
+
+    values["library.query"] = toUtf8(controlText(gApp.libraryQuery));
+    values["library.field"] = std::to_string(
+        static_cast<int>(SendMessageW(gApp.libraryField, CB_GETCURSEL, 0, 0)));
+    values["library.folder_only"] = gApp.libraryFolderOnly ? "1" : "0";
+    values["library.duplicates_only"] = gApp.libraryDuplicatesOnly ? "1" : "0";
+
+    saveSortState(values, gApp.runSort, "sort.runs.column", "sort.runs.ascending");
+    saveSortState(values, gApp.runKillSort, "sort.run_kills.column", "sort.run_kills.ascending");
+    saveSortState(values, gApp.allEventSort, "sort.events.column", "sort.events.ascending");
+    saveSortState(values, gApp.folderRunSort, "sort.folder_runs.column", "sort.folder_runs.ascending");
+    saveSortState(values, gApp.folderKillSort, "sort.folder_kills.column", "sort.folder_kills.ascending");
+    saveSortState(values, gApp.highlightSort, "sort.highlights.column", "sort.highlights.ascending");
+    saveSortState(values, gApp.librarySort, "sort.library.column", "sort.library.ascending");
+
+    std::string error;
+    if (etlfrag::savePersistentState(gApp.indexPath, values, error)) {
+        gApp.sessionState = std::move(values);
+    }
+}
+
 bool parseIntegerField(HWND control, int minimum, int maximum, int& value) {
     const std::wstring text = controlText(control);
     wchar_t* end = nullptr;
@@ -3462,7 +3717,7 @@ void playAtPath(
             if (log) {
                 SYSTEMTIME now{};
                 GetLocalTime(&now);
-                log << "ET: Legacy Frag Finder 1.7.3 playback launch\r\n"
+                log << "ET: Legacy Frag Finder 1.7.4 playback launch\r\n"
                     << "Time: " << std::setfill('0') << std::setw(4) << now.wYear << '-'
                     << std::setw(2) << now.wMonth << '-' << std::setw(2) << now.wDay << ' '
                     << std::setw(2) << now.wHour << ':' << std::setw(2) << now.wMinute << ':'
@@ -4613,6 +4868,7 @@ void showTab(int tab) {
     setVisible(gApp.timeline, !library);
     setVisible(gApp.renderQueue, multi || folder);
     setVisible(gApp.exportCurrent, true);
+    setVisible(gApp.fastCapture, true);
     RECT client{};
     GetClientRect(gApp.window, &client);
     if (multi || folder) {
@@ -5325,7 +5581,8 @@ void paintWindow(HDC target) {
 
 bool isPrimaryButton(int id) {
     return id == IdOpenDemo || id == IdSearch || id == IdFolderScan ||
-           id == IdExportCurrent || id == IdLibrarySearch || id == IdRenderRun ||
+           id == IdExportCurrent || id == IdFastCapture ||
+           id == IdLibrarySearch || id == IdRenderRun ||
            id == IdRenderEvent || id == IdRenderFolderRun ||
            id == IdRenderHighlight || id == IdRenderAllHighlights;
 }
@@ -5612,7 +5869,8 @@ void recreateDpiResources() {
         }
         for (HWND control : {
                  gApp.openDemo, gApp.tabMultiKills, gApp.tabAllEvents, gApp.tabFolderScan,
-                 gApp.tabHighlights, gApp.tabLibrary, gApp.exportCurrent, gApp.launchSetup,
+                 gApp.tabHighlights, gApp.tabLibrary, gApp.exportCurrent, gApp.fastCapture,
+                 gApp.launchSetup,
                  gApp.search,
                  gApp.chooseEtl, gApp.playRun, gApp.addRunHighlight, gApp.playEvent,
                  gApp.renderRun, gApp.renderQueue, gApp.renderEvent, gApp.viewProtocolLog,
@@ -5697,8 +5955,9 @@ void layoutAllControls(int width, int height) {
 
     const int tabY = scale(207);
     const int tabHeight = scale(35);
-    const int exportWidth = scale(180);
-    const int tabsRight = width - margin - exportWidth - gap;
+    const int exportWidth = scale(170);
+    const int captureWidth = scale(135);
+    const int tabsRight = width - margin - exportWidth - captureWidth - gap * 2;
     const int tabsWidth = std::max(scale(500), tabsRight - margin);
     const int tabWidth = tabsWidth / 5;
     MoveWindow(gApp.tabMultiKills, margin, tabY, tabWidth - scale(5), tabHeight, TRUE);
@@ -5706,6 +5965,13 @@ void layoutAllControls(int width, int height) {
     MoveWindow(gApp.tabFolderScan, margin + tabWidth * 2, tabY, tabWidth - scale(5), tabHeight, TRUE);
     MoveWindow(gApp.tabHighlights, margin + tabWidth * 3, tabY, tabWidth - scale(5), tabHeight, TRUE);
     MoveWindow(gApp.tabLibrary, margin + tabWidth * 4, tabY, tabWidth - scale(5), tabHeight, TRUE);
+    MoveWindow(
+        gApp.fastCapture,
+        width - margin - exportWidth - captureWidth - gap,
+        tabY + scale(1),
+        captureWidth,
+        tabHeight - scale(2),
+        TRUE);
     MoveWindow(
         gApp.exportCurrent,
         width - margin - exportWidth,
@@ -6237,6 +6503,13 @@ void createInterface(HWND window) {
         BS_OWNERDRAW | WS_TABSTOP,
         IdExportCurrent,
         gApp.labelFont);
+    gApp.fastCapture = createControl(
+        0,
+        WC_BUTTONW,
+        L"Fast capture",
+        BS_OWNERDRAW | WS_TABSTOP,
+        IdFastCapture,
+        gApp.labelFont);
     gApp.launchAsAdministrator = createControl(
         0,
         WC_BUTTONW,
@@ -6760,9 +7033,9 @@ void createInterface(HWND window) {
     populateFolderWeapons();
     populatePostDeathWindows(gApp.postDeathWindow);
     populatePostDeathWindows(gApp.folderPostDeathWindow);
+    restoreSessionControls();
     populateHighlightResults();
     updatePlaybackButtonLabels();
-    searchLibrary(false);
     std::wstring savedFolder(32768, L'\0');
     const DWORD savedFolderLength = GetPrivateProfileStringW(
         L"Folder",
@@ -6772,20 +7045,59 @@ void createInterface(HWND window) {
         static_cast<DWORD>(savedFolder.size()),
         gApp.iniPath.c_str());
     savedFolder.resize(savedFolderLength);
+    const std::string sessionFolder = sessionValue("ui.folder");
+    if (!sessionFolder.empty()) {
+        savedFolder = toWide(sessionFolder);
+    }
     std::error_code savedFolderError;
     if (!savedFolder.empty() &&
         std::filesystem::is_directory(savedFolder, savedFolderError) && !savedFolderError) {
         setDemoFolder(savedFolder);
     }
+    searchLibrary(false);
+
+    const std::filesystem::path lastDemo(toWide(sessionValue("ui.last_demo")));
+    std::error_code lastDemoError;
+    if (!lastDemo.empty() &&
+        std::filesystem::is_regular_file(lastDemo, lastDemoError) && !lastDemoError) {
+        loadDemo(lastDemo);
+        restoreDemoSessionSelections();
+    }
+
     updateTabLabels();
-    showTab(0);
+    showTab(sessionInteger("ui.active_tab", 0, 0, 4));
+
+    const int left = sessionInteger("ui.window.left", 0, -32000, 32000);
+    const int top = sessionInteger("ui.window.top", 0, -32000, 32000);
+    const int right = sessionInteger("ui.window.right", 0, -32000, 32000);
+    const int bottom = sessionInteger("ui.window.bottom", 0, -32000, 32000);
+    RECT restoredRect{left, top, right, bottom};
+    if (right - left >= scale(640) && bottom - top >= scale(480) &&
+        MonitorFromRect(&restoredRect, MONITOR_DEFAULTTONULL) != nullptr) {
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        placement.showCmd = sessionBoolean("ui.window.maximized", false)
+                                ? SW_SHOWMAXIMIZED
+                                : SW_SHOWNORMAL;
+        placement.rcNormalPosition = restoredRect;
+        SetWindowPlacement(window, &placement);
+    }
 }
 
 LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE:
-            createInterface(window);
-            return 0;
+            try {
+                createInterface(window);
+                appendStartupLog(L"Main interface initialized successfully.");
+                return 0;
+            } catch (const std::exception& exception) {
+                reportStartupFailure(window, toWide(exception.what()));
+                return -1;
+            } catch (...) {
+                reportStartupFailure(window, L"An unknown error occurred while creating the main window.");
+                return -1;
+            }
         case kFolderScanProgressMessage:
             if (gApp.folderScanRunning) {
                 setStatus(
@@ -6919,6 +7231,9 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     return 0;
                 case IdExportCurrent:
                     exportCurrentView();
+                    return 0;
+                case IdFastCapture:
+                    etlfrag::captureui::open(gApp.window, gApp.iniPath, {}, {});
                     return 0;
                 case IdLaunchAsAdministrator:
                     gApp.launchEtlAsAdministrator = !gApp.launchEtlAsAdministrator;
@@ -7276,7 +7591,14 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             }
             return 0;
         }
+        case WM_CLOSE:
+            // Read the child controls while they still exist, then let the
+            // normal destruction path stop workers and close the SQLite index.
+            saveSessionState();
+            DestroyWindow(window);
+            return 0;
         case WM_DESTROY:
+            etlfrag::captureui::shutdown();
             etlfrag::clipui::shutdown();
             if (gApp.protocolInspector != nullptr) {
                 DestroyWindow(gApp.protocolInspector);
@@ -7321,6 +7643,8 @@ void enableDarkTitleBar(HWND window) {
 } // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
+    appendStartupLog(L"ET: Legacy Frag Finder 1.7.4 starting.");
+    try {
     const HRESULT comInitialization =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     INITCOMMONCONTROLSEX controls{};
@@ -7344,6 +7668,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     inspectorClass.hbrBackground = nullptr;
     inspectorClass.lpszClassName = kProtocolInspectorClass;
     if (!RegisterClassExW(&inspectorClass)) {
+        appendStartupLog(L"Could not register the protocol inspector window class.");
         if (SUCCEEDED(comInitialization)) CoUninitialize();
         return 1;
     }
@@ -7357,6 +7682,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     timelineClass.hbrBackground = nullptr;
     timelineClass.lpszClassName = kTimelineClass;
     if (!RegisterClassExW(&timelineClass)) {
+        appendStartupLog(L"Could not register the timeline window class.");
         if (SUCCEEDED(comInitialization)) {
             CoUninitialize();
         }
@@ -7388,6 +7714,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     windowClass.hbrBackground = nullptr;
     windowClass.lpszClassName = kWindowClass;
     if (!RegisterClassExW(&windowClass)) {
+        appendStartupLog(L"Could not register the main window class.");
         if (SUCCEEDED(comInitialization)) {
             CoUninitialize();
         }
@@ -7415,13 +7742,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
         instance,
         nullptr);
     if (window == nullptr) {
+        reportStartupFailure(
+            nullptr,
+            L"Windows could not create the main window (error " +
+                std::to_wstring(GetLastError()) + L").");
         if (SUCCEEDED(comInitialization)) {
             CoUninitialize();
         }
         return 1;
     }
     enableDarkTitleBar(window);
-    ShowWindow(window, showCommand);
+    ShowWindow(
+        window,
+        sessionBoolean("ui.window.maximized", false) ? SW_SHOWMAXIMIZED : showCommand);
     UpdateWindow(window);
 
     int argumentCount = 0;
@@ -7442,4 +7775,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
         CoUninitialize();
     }
     return static_cast<int>(message.wParam);
+    } catch (const std::exception& exception) {
+        reportStartupFailure(nullptr, toWide(exception.what()));
+        return 1;
+    } catch (...) {
+        reportStartupFailure(nullptr, L"An unknown error occurred during application startup.");
+        return 1;
+    }
 }

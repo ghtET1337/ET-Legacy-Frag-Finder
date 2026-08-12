@@ -1,6 +1,6 @@
 # Optional native `video-pipe-range` command
 
-ET: Legacy Frag Finder 1.7.3 works with an unmodified ET: Legacy 2.83 or newer through the corrected stock time controller. The optional patch provides direct engine-side `serverTime` range control.
+ET: Legacy Frag Finder 1.7.4 works with an unmodified ET: Legacy 2.83 or newer through the corrected stock time controller. The optional patch provides direct engine-side `serverTime` range control.
 
 The **Native video-pipe-range** controller is an optional engine-side implementation. It accepts exactly:
 

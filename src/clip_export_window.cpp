@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "clip_export_window.hpp"
+#include "app_storage.hpp"
 
 #ifdef _WIN32
 
@@ -636,6 +637,90 @@ void populateQueue() {
     EnableWindow(gState->cancel, gState->rendering);
 }
 
+std::filesystem::path persistenceDatabasePath() {
+    if (gState == nullptr || gState->settingsPath.empty()) {
+        return {};
+    }
+    return gState->settingsPath.parent_path() / L"demo-index-v3.sqlite3";
+}
+
+void persistQueue() {
+    if (gState == nullptr) {
+        return;
+    }
+    std::vector<PersistentQueueJob> stored;
+    {
+        std::lock_guard<std::mutex> lock(gState->jobsMutex);
+        stored.reserve(gState->jobs.size());
+        for (std::size_t index = 0; index < gState->jobs.size(); ++index) {
+            const ClipJob& job = gState->jobs[index];
+            PersistentQueueJob record;
+            record.id = job.id;
+            record.position = static_cast<int>(index);
+            record.demoPath = job.source.demoPath;
+            record.label = job.source.label;
+            record.actionStartMs = job.source.actionStartMs;
+            record.actionEndMs = job.source.actionEndMs;
+            record.status = static_cast<int>(job.status);
+            record.detail = job.detail;
+            record.outputPath = job.outputPath;
+            record.logPath = job.logPath;
+            stored.push_back(std::move(record));
+        }
+    }
+    std::string ignored;
+    savePersistentQueue(persistenceDatabasePath(), "offline-render", stored, ignored);
+}
+
+void restoreQueue() {
+    if (gState == nullptr) {
+        return;
+    }
+    std::vector<PersistentQueueJob> stored;
+    std::string error;
+    if (!loadPersistentQueue(persistenceDatabasePath(), "offline-render", stored, error)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(gState->jobsMutex);
+    for (const PersistentQueueJob& record : stored) {
+        std::error_code fileError;
+        const bool demoAvailable =
+            std::filesystem::is_regular_file(record.demoPath, fileError) && !fileError;
+
+        ClipJob job;
+        job.id = record.id;
+        job.source.demoPath = record.demoPath;
+        job.source.label = record.label;
+        job.source.actionStartMs = record.actionStartMs;
+        job.source.actionEndMs = record.actionEndMs;
+        job.settings = gState->settings;
+        job.range = calculateClipRange(job.source, job.settings);
+        job.baseName = makeSafeClipBaseName(job.source, job.range, job.id);
+        const int maximumStatus = static_cast<int>(JobStatus::Cancelled);
+        job.status = static_cast<JobStatus>(std::clamp(record.status, 0, maximumStatus));
+        job.detail = record.detail;
+        job.outputPath = record.outputPath;
+        job.logPath = record.logPath;
+
+        if (job.status == JobStatus::Starting || job.status == JobStatus::Rendering) {
+            job.status = JobStatus::Queued;
+            job.detail = L"Restored after an interrupted application session";
+        } else if (job.status == JobStatus::Completed) {
+            std::error_code outputError;
+            if (!std::filesystem::is_regular_file(job.outputPath, outputError) || outputError) {
+                job.status = JobStatus::Failed;
+                job.detail = L"Saved output file is no longer available";
+            }
+        }
+        if (!demoAvailable && job.status == JobStatus::Queued) {
+            job.status = JobStatus::Failed;
+            job.detail = L"Source demo is no longer available";
+        }
+        gState->nextId = std::max(gState->nextId, job.id + 1);
+        gState->jobs.push_back(std::move(job));
+    }
+}
+
 std::optional<std::size_t> selectedJobIndex() {
     const int row = ListView_GetNextItem(gState->queue, -1, LVNI_SELECTED);
     if (row < 0) return std::nullopt;
@@ -652,26 +737,31 @@ std::optional<std::size_t> selectedJobIndex() {
 }
 
 std::size_t addSources(const std::vector<ClipSource>& sources) {
-    std::lock_guard<std::mutex> lock(gState->jobsMutex);
     std::size_t added = 0;
-    for (const ClipSource& source : sources) {
-        const bool duplicate = std::any_of(
-            gState->jobs.begin(), gState->jobs.end(),
-            [&source](const ClipJob& job) {
-                return job.source.demoPath == source.demoPath &&
-                       job.source.actionStartMs == source.actionStartMs &&
-                       job.source.actionEndMs == source.actionEndMs &&
-                       job.status != JobStatus::Failed && job.status != JobStatus::Cancelled;
-            });
-        if (duplicate) continue;
-        ClipJob job;
-        job.id = gState->nextId++;
-        job.source = source;
-        job.settings = gState->settings;
-        job.range = calculateClipRange(source, job.settings);
-        job.baseName = makeSafeClipBaseName(source, job.range, job.id);
-        gState->jobs.push_back(std::move(job));
-        ++added;
+    {
+        std::lock_guard<std::mutex> lock(gState->jobsMutex);
+        for (const ClipSource& source : sources) {
+            const bool duplicate = std::any_of(
+                gState->jobs.begin(), gState->jobs.end(),
+                [&source](const ClipJob& job) {
+                    return job.source.demoPath == source.demoPath &&
+                           job.source.actionStartMs == source.actionStartMs &&
+                           job.source.actionEndMs == source.actionEndMs &&
+                           job.status != JobStatus::Failed && job.status != JobStatus::Cancelled;
+                });
+            if (duplicate) continue;
+            ClipJob job;
+            job.id = gState->nextId++;
+            job.source = source;
+            job.settings = gState->settings;
+            job.range = calculateClipRange(source, job.settings);
+            job.baseName = makeSafeClipBaseName(source, job.range, job.id);
+            gState->jobs.push_back(std::move(job));
+            ++added;
+        }
+    }
+    if (added > 0) {
+        persistQueue();
     }
     if (added > 0) {
         setStatus(std::to_wstring(added) + L" action(s) added to the clip render queue.");
@@ -942,6 +1032,7 @@ void updateJob(
         if (!output.empty()) gState->jobs[index].outputPath = output;
         if (!log.empty()) gState->jobs[index].logPath = log;
     }
+    persistQueue();
     PostMessageW(gState->window, kQueueChanged, 0, 0);
 }
 
@@ -1171,6 +1262,96 @@ unsigned __stdcall renderWorker(void*) {
     return 0;
 }
 
+std::wstring renderOverrideCommandList(const ClipExportSettings& settings) {
+    const std::wstring profile = settings.sourceProfileFolder.empty()
+        ? L"<current/default ETL profile>"
+        : settings.sourceProfileFolder.filename().wstring();
+    std::wostringstream commands;
+    commands
+        << L"Startup/profile selection\r\n"
+        << L"+set fs_homepath \"" << settings.etlHomeFolder.wstring() << L"\"\r\n"
+        << L"+set fs_game \"<mod detected from each demo>\"\r\n"
+        << L"+set cl_profile \"" << profile << L"\"\r\n\r\n"
+        << L"Audio and video-pipe\r\n"
+        << L"+set s_initsound 1\r\n"
+        << L"+set s_useOpenAL 0\r\n"
+        << L"+set s_muteWhenMinimized 0\r\n"
+        << L"+set s_muteWhenUnfocused 0\r\n"
+        << L"+set cl_avidemo 0\r\n"
+        << L"+set timescale 1\r\n"
+        << L"+set cl_aviFrameRate " << settings.frameRate << L"\r\n"
+        << L"+set cl_aviPipeExtension mp4\r\n"
+        << L"+set cl_aviPipeFormat \"" << buildPipeFormat(settings) << L"\"\r\n\r\n"
+        << L"Display and frame pacing\r\n"
+        << L"+set r_fullscreen 0\r\n"
+        << L"+set r_mode -1\r\n"
+        << L"+set r_customwidth " << settings.width << L"\r\n"
+        << L"+set r_customheight " << settings.height << L"\r\n"
+        << L"+set r_swapInterval 0\r\n"
+        << L"+set com_maxfps " << settings.frameRate << L"\r\n"
+        << L"+set com_maxfpsUnfocused " << settings.frameRate << L"\r\n"
+        << L"+set com_maxfpsMinimized " << settings.frameRate << L"\r\n"
+        << L"+set cg_draw2D " << (settings.drawHud ? 1 : 0) << L"\r\n"
+        << L"+seta demo_infoWindow 0\r\n"
+        << L"+set cl_videoPipeRangeQuit 1\r\n"
+        << L"+vid_restart\r\n\r\n"
+        << L"After the demo becomes active\r\n"
+        << L"seta demo_infoWindow 0\r\n";
+    if (settings.engineMode == ClipEngineMode::NativeVideoPipeRange) {
+        commands << L"video-pipe-range <filename> <startTime> <endTime>\r\n";
+    } else {
+        commands
+            << L"seek <startTime>; set timescale 1; set cl_aviFrameRate "
+            << settings.frameRate
+            << L"; video-pipe <filename>; wait <calculated frames>; stopvideo; quit\r\n";
+    }
+    return commands.str();
+}
+
+bool confirmRenderOverrides(const ClipExportSettings& settings) {
+    const std::wstring commands = renderOverrideCommandList(settings);
+    const TASKDIALOG_BUTTON buttons[] = {
+        {1001, L"Start render queue"},
+        {IDCANCEL, L"Cancel"},
+    };
+    TASKDIALOGCONFIG dialog{};
+    dialog.cbSize = sizeof(dialog);
+    dialog.hwndParent = gState->window;
+    dialog.hInstance = GetModuleHandleW(nullptr);
+    dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION |
+                     TDF_SIZE_TO_CONTENT |
+                     TDF_EXPANDED_BY_DEFAULT;
+    dialog.pszWindowTitle = L"Render Clip — ETL command warning";
+    dialog.pszMainIcon = TD_WARNING_ICON;
+    dialog.pszMainInstruction =
+        L"Frag Finder is about to override ET: Legacy settings for rendering.";
+    dialog.pszContent =
+        L"The commands below are applied to the dedicated ETL render process before each "
+        L"queued clip. demo_infoWindow is forced to 0 at startup and again after cgame "
+        L"loads. ETL may save archived cvars in the selected profile; Frag Finder does not "
+        L"automatically restore them after rendering.";
+    dialog.pszExpandedInformation = commands.c_str();
+    dialog.pszExpandedControlText = L"Show exact commands";
+    dialog.pszCollapsedControlText = L"Hide exact commands";
+    dialog.cButtons = static_cast<UINT>(std::size(buttons));
+    dialog.pButtons = buttons;
+    dialog.nDefaultButton = 1001;
+    dialog.pszFooter =
+        L"Select Cancel to return to the queue without launching ET: Legacy.";
+    int selected = IDCANCEL;
+    const HRESULT shown = TaskDialogIndirect(
+        &dialog, &selected, nullptr, nullptr);
+    if (SUCCEEDED(shown)) return selected == 1001;
+
+    const int fallback = MessageBoxW(
+        gState->window,
+        (L"Render Clip will override these ETL commands:\r\n\r\n" + commands +
+         L"\r\nContinue and launch ET: Legacy?").c_str(),
+        L"Render Clip — ETL command warning",
+        MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING);
+    return fallback == IDYES;
+}
+
 void startRendering() {
     if (gState->rendering.load()) return;
     const auto selectedSettings = settingsFromControls();
@@ -1223,8 +1404,13 @@ void startRendering() {
             return;
         }
     }
+    if (!confirmRenderOverrides(effective)) {
+        setStatus(L"Render cancelled before ET: Legacy was launched.");
+        return;
+    }
     gState->settings = effective;
     saveSettings(effective);
+    persistQueue();
     gState->cancelRequested.store(false);
     gState->rendering.store(true);
     populateQueue();
@@ -1350,6 +1536,7 @@ void removeSelected() {
         std::lock_guard<std::mutex> lock(gState->jobsMutex);
         if (*index < gState->jobs.size()) gState->jobs.erase(gState->jobs.begin() + *index);
     }
+    persistQueue();
     populateQueue();
 }
 
@@ -1363,6 +1550,7 @@ void clearFinished() {
                 [](const ClipJob& job) { return job.status != JobStatus::Queued; }),
             gState->jobs.end());
     }
+    persistQueue();
     populateQueue();
 }
 
@@ -1756,6 +1944,7 @@ std::size_t updateQueue(
         }
         gState->settings.sourceProfileFolder = sourceProfileFolder;
         gState->settings.startupConfig = startupConfig;
+        restoreQueue();
         if (!registerClass()) {
             delete gState;
             gState = nullptr;
@@ -1859,6 +2048,7 @@ void shutdown() {
         CloseHandle(gState->worker);
         gState->worker = nullptr;
     }
+    persistQueue();
     releaseMediaPlayer();
     if (gState->mediaFoundationStarted && gState->mediaShutdown != nullptr) {
         gState->mediaShutdown();

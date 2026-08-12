@@ -1,0 +1,94 @@
+ET: Legacy Frag Finder 1.7.4 by ght
+========================================
+
+Startup hotfix
+--------------
+
+- Rebuilt the Windows executable with the complete C++ runtime startup path;
+  this fixes the maintenance build that could exit silently before showing its
+  main window.
+- Startup exceptions now show an error dialog instead of disappearing silently
+  and are recorded in `%LOCALAPPDATA%\ETLFragFinder\startup.log`.
+- The application version remains 1.7.4 and the manual F9 capture workflow is
+  unchanged.
+
+SQLite session and render-queue recovery
+----------------------------------------
+
+- Restores the indexed library view, last demo and folder, active tab,
+  searches, filters, player/weapon selections, checkbox options, all table
+  sort columns/directions and the main-window position after a restart.
+- Stores the existing Render Clip queue in the same SQLite database as the
+  demo index, using a separate namespaced queue table.
+- Queued jobs, interrupted Starting/Rendering jobs and completed render
+  history no longer disappear when Frag Finder is closed.
+- An interrupted active job returns to Queued. Missing source demos or moved
+  output files remain visible and receive a clear Failed explanation.
+- Queue entries retain their demo/action times, status, output path and log
+  path until explicitly removed or cleared by the user.
+- Fast capture remains the stable manual F9 recorder from this 1.7.4 base;
+  no automatic Fast Capture action queue is included in this build.
+
+Fast Capture frame pacing
+-------------------------
+
+- Added Smooth constant FPS as the default Fast capture pacing mode. It creates
+  a stable CFR timeline for more predictable playback in media players.
+- Added Only new desktop frames (VFR) for source-faithful diagnostics and
+  workflows where repeated pacing frames are not wanted.
+- Smooth mode keeps ddagrab source-faithful with dup_frames=0, then applies the
+  requested CFR in FFmpeg so pacing duplicates can be counted and reported.
+- The completion status now separates output FPS, approximate source FPS,
+  output frame count, paced duplicates and dropped frames.
+- Changed the 240+ FPS NVIDIA High profile from P4 with B-frames to the lighter
+  P3/no-lookahead/no-B-frame path. Balanced uses P2; Maximum uses P4.
+- Target FPS remains 250 by default, with presets through 500 and a custom
+  30-1000 FPS field. F9 still starts and stops recording.
+- NVENC probing remains fixed at 640x360 and Auto still checks NVENC, AMF,
+  Intel Quick Sync and software x264 in that order.
+- True 250 unique game frames still require the game, Windows presentation and
+  display mode to expose roughly 250 updates each second. Smooth CFR improves
+  timing compatibility but clearly reports repeated pacing frames.
+
+Fast Capture display-safety warning
+-----------------------------------
+
+- Added a dedicated warning before opening Fast Capture. It explains that
+  Alt+Tab, switching windows/displays, fullscreen transitions, resolution
+  changes and refresh-rate changes can invalidate Desktop Duplication and stop
+  FFmpeg with `AcquireNextFrame failed: 887a0026`.
+- The warning offers Open Fast Capture, Copy commands and open Fast Capture, or
+  Cancel. The copied ETL-console line is `r_fullscreen 0; vid_restart`.
+- Added a persistent Copy ETL windowed commands button inside the Fast Capture
+  window. It is disabled while recording so the user cannot deliberately cause
+  a display restart in the middle of a capture.
+- Error 887a0026 is now identified as a display-transition failure rather than
+  being incorrectly reported as a system-audio pipe failure.
+- The interrupted recording's recoverable MKV and capture log remain separate.
+  Frag Finder never auto-resumes or concatenates them with a later recording;
+  the next F9 always creates a new clip.
+- Prevented the global F9 hotkey from starting a second recording underneath an
+  open Fast Capture result or clipboard message.
+
+Render Clip safety and demo HUD
+-------------------------------
+
+- Every Render Clip launch now forces `seta demo_infoWindow 0` before the demo
+  starts and repeats it through activeAction after cgame becomes available.
+- Added a separate warning window before the render queue launches ET: Legacy.
+- The warning displays exact effective values for fs_homepath, fs_game/profile,
+  audio backend, video pipe, FFmpeg format, resolution, FPS, V-Sync, max FPS,
+  HUD, demo_infoWindow, vid_restart and the selected range controller.
+- The dialog explains that archived cvars may be saved in the selected ETL
+  profile and are not automatically restored after rendering.
+- Start render queue explicitly continues. Cancel returns to the queue without
+  opening ETL and leaves queued actions intact.
+
+Compatibility and versioning
+----------------------------
+
+- Application, executable resource, assembly manifest and CMake project version
+  are now 1.7.4.
+- Existing SQLite demo indexes, settings and highlight baskets remain valid.
+- The release includes the Windows x64 executable, CLI, source, documentation,
+  licenses and SHA-256 checksums.
