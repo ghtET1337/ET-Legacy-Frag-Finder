@@ -325,8 +325,15 @@ std::wstring buildEtlClipArguments(
     const std::wstring& launchProfile) {
     const std::wstring demo =
         std::filesystem::absolute(source.demoPath).lexically_normal().generic_wstring();
-    const std::wstring action = buildRangeAction(safeBaseName, range, settings);
-    std::wstring arguments = buildEtlStartupArguments(
+    const std::wstring action =
+        L"wait " + std::to_wstring(kEtlPostSnapshotActionDelayFrames) + L"; " +
+        buildRangeAction(safeBaseName, range, settings);
+    // ETL allocates its main zone before configs and demo data are loaded.
+    // The stock 64 MiB client zone can be exhausted by high-resolution
+    // video-pipe jobs, so this must be a process-start command-line cvar.
+    std::wstring arguments =
+        L"+set com_zoneMegs " + std::to_wstring(kEtlRenderZoneMegs) + L" ";
+    arguments += buildEtlStartupArguments(
         source.demoPath,
         settings.etlHomeFolder,
         launchProfile);
@@ -353,7 +360,8 @@ std::wstring buildEtlClipArguments(
         L" +set cl_videoPipeRangeQuit 1 "
         L"+vid_restart "
         L"+set activeAction \"" + action + L"\" "
-        L"+demo \"" + demo + L"\"";
+        L"+wait " + std::to_wstring(kEtlColdStartDemoDelayFrames) +
+        L" +demo \"" + demo + L"\"";
     return arguments;
 }
 
@@ -383,11 +391,21 @@ std::wstring buildEtlPlaybackArguments(
         etlHomeFolder,
         launchProfile);
     if (seekMs.has_value() && *seekMs > 0) {
-        arguments += L"+set activeAction \"seek " + secondsText(*seekMs) + L"\" ";
+        // activeAction runs after the first active demo snapshot.  Give cgame
+        // and the renderer a short second-stage settling period before seek.
+        arguments += L"+set activeAction \"wait " +
+                     std::to_wstring(kEtlPostSnapshotActionDelayFrames) + L"; seek " +
+                     secondsText(*seekMs) + L"\" ";
     }
     const std::wstring demo =
         std::filesystem::absolute(demoPath).lexically_normal().generic_wstring();
-    arguments += L"+demo \"" + demo + L"\"";
+    // Keep the demo command in ETL's command buffer until cold-start profile,
+    // filesystem, renderer and cgame setup have had time to settle.  ETL's
+    // `wait N` command preserves all following commands and resumes them after
+    // N engine frames.  This mirrors the reliable behaviour of pasting the
+    // same demo command into an already running ETL client.
+    arguments += L"+wait " + std::to_wstring(kEtlColdStartDemoDelayFrames) +
+                 L" +demo \"" + demo + L"\"";
     return arguments;
 }
 

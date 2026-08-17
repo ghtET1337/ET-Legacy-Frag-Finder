@@ -9,6 +9,10 @@
 
 namespace etlfrag {
 
+inline constexpr int kEtlColdStartDemoDelayFrames = 500;
+inline constexpr int kEtlPostSnapshotActionDelayFrames = 100;
+inline constexpr int kEtlRenderZoneMegs = 512;
+
 enum class ClipQuality {
     Master,
     High,

@@ -1,0 +1,65 @@
+ET: Legacy Frag Finder 1.7.5 by ght
+========================================
+
+High-resolution Render Clip memory fix
+--------------------------------------
+
+- Every dedicated Render Clip ETL process now starts with
+  +set com_zoneMegs 512 before homepath, mod, profile or demo loading.
+- ET: Legacy normally gives the client main zone 64 MB. The 512 MB render
+  override prevents high-resolution video-pipe jobs, including the supported
+  custom resolutions up to 7680x4320, from exhausting that pool while the map
+  and capture buffers are being prepared.
+- The override is intentionally applied only to Render Clip processes. Normal
+  action playback and the manual Fast Capture recorder are unchanged.
+- The pre-render command warning lists the exact memory command so it can be
+  verified before the queue starts. Automated tests require it to remain the
+  first Render Clip startup argument.
+- This maintenance fix remains version 1.7.5.
+
+Render Clip cold-start compatibility
+------------------------------------
+
+- Render Clip now uses the same two-stage cold-start protection that fixed
+  normal action playback in 1.7.4.
+- Every dedicated ETL render process applies fs_homepath, fs_game, the selected
+  profile and all render overrides before attempting to load its source demo.
+- After vid_restart, Frag Finder registers the selected range controller in
+  activeAction, waits 500 ETL engine frames, and only then executes demo with
+  the absolute source path.
+- After the first active demo snapshot, activeAction waits another 100 engine
+  frames before seeking or starting video-pipe/video-pipe-range.
+- Both Stock ETL (corrected time) and Patched ETL (exact serverTime) jobs use
+  the same compatibility ordering, including jobs restored from the persistent
+  render queue and jobs created from saved highlights.
+- The 500/100 waits affect process initialization rather than demo time. They
+  do not shorten, shift or otherwise change the requested render range.
+- The Render Clip command warning now displays both compatibility delays and
+  the exact point at which the demo and delayed range controller are executed.
+- Automated tests enforce the ordering vid_restart -> delayed activeAction ->
+  wait 500 -> demo, preventing a later release from silently dropping it.
+
+Add to highlights context command
+---------------------------------
+
+- Added Add to highlights to the right-click action menu in Folder scan.
+- Right-clicking first selects the exact row under the pointer, so the command
+  saves the action that opened the menu rather than a previously selected row.
+- The command reuses the existing persistent highlight-basket implementation,
+  including duplicate detection, status feedback and automatic disk saving.
+- The existing Add to highlights buttons and highlight file format are
+  unchanged.
+
+Compatibility and versioning
+----------------------------
+
+- Normal playback retains its working wait 500 -> demo -> first snapshot ->
+  wait 100 -> seek sequence from the final 1.7.4 build.
+- Application, executable resource, assembly manifest, diagnostics and CMake
+  project version are now 1.7.5.
+- Existing SQLite demo indexes, settings, render queues and highlight baskets
+  remain compatible and do not require another scan or migration.
+- Fast Capture remains the manual F9 recorder with the display-safety warning;
+  this release does not add automatic capture resume or clip concatenation.
+- The release includes the Windows x64 executable, CLI, source, documentation,
+  licenses and SHA-256 checksums.

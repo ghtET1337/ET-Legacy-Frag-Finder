@@ -53,6 +53,7 @@ constexpr UINT kFolderMenuOpenLocation = 9101;
 constexpr UINT kFolderMenuCopyConsoleCommand = 9102;
 constexpr UINT kFolderMenuAddRenderQueue = 9103;
 constexpr UINT kFolderMenuLoadMultiKills = 9104;
+constexpr UINT kFolderMenuAddHighlights = 9105;
 constexpr UINT kEtlSetupProfileDefault = 9201;
 constexpr UINT kEtlSetupChooseHome = 9202;
 constexpr UINT kEtlSetupRefreshProfiles = 9203;
@@ -431,6 +432,7 @@ void searchRuns();
 void searchLibrary(bool reportStatus);
 etlfrag::DemoSearchField selectedSearchField(HWND fieldControl);
 void addSelectedFolderRunToRenderQueue();
+void addSelectedFolderRunToHighlights();
 void loadSelectedFolderDemoInMultiKills();
 
 int scale(int value) {
@@ -3683,11 +3685,9 @@ void playAtPath(
             throw std::runtime_error(toUtf8(preparationError));
         }
 
-        // Do not execute `seek` as the next startup command.  At that point
-        // `demo` has only advanced the client to CA_PRIMED; cgame and the first
-        // active snapshot are not ready yet.  ETL's activeAction is explicitly
-        // run by CL_FirstSnapshot after the demo becomes active, which makes
-        // seeking safe for both current and older ET: Legacy clients.
+        // buildEtlPlaybackArguments first defers `demo` during a cold ETL
+        // startup, then queues `seek` through activeAction after the first
+        // active snapshot.  This avoids both known unsafe loading phases.
         const std::wstring arguments = etlfrag::buildEtlPlaybackArguments(
             absoluteDemo,
             gApp.etlHomeFolder,
@@ -3717,7 +3717,7 @@ void playAtPath(
             if (log) {
                 SYSTEMTIME now{};
                 GetLocalTime(&now);
-                log << "ET: Legacy Frag Finder 1.7.4 playback launch\r\n"
+                log << "ET: Legacy Frag Finder 1.7.5 playback launch\r\n"
                     << "Time: " << std::setfill('0') << std::setw(4) << now.wYear << '-'
                     << std::setw(2) << now.wMonth << '-' << std::setw(2) << now.wDay << ' '
                     << std::setw(2) << now.wHour << ':' << std::setw(2) << now.wMinute << ':'
@@ -3730,6 +3730,13 @@ void playAtPath(
                     << "Administrator requested: "
                     << (gApp.launchEtlAsAdministrator ? "yes" : "no") << "\r\n"
                     << "Automatic seek enabled: " << (automaticSeek ? "yes" : "no")
+                    << "\r\n"
+                    << "Cold-start demo delay (engine frames): "
+                    << etlfrag::kEtlColdStartDemoDelayFrames << "\r\n"
+                    << "Post-snapshot seek delay (engine frames): "
+                    << (automaticSeek
+                            ? std::to_string(etlfrag::kEtlPostSnapshotActionDelayFrames)
+                            : "not applicable")
                     << "\r\n"
                     << "ETL user data (fs_homepath): "
                     << toUtf8(gApp.etlHomeFolder.wstring()) << "\r\n"
@@ -3922,6 +3929,7 @@ void showFolderRunContextMenu() {
     if (selectedFolderRunResult() == nullptr) return;
     HMENU menu = CreatePopupMenu();
     if (menu == nullptr) return;
+    AppendMenuW(menu, MF_STRING, kFolderMenuAddHighlights, L"Add to highlights");
     AppendMenuW(menu, MF_STRING, kFolderMenuAddRenderQueue, L"Add clip to render queue");
     AppendMenuW(
         menu,
@@ -3946,7 +3954,9 @@ void showFolderRunContextMenu() {
         gApp.window,
         nullptr);
     DestroyMenu(menu);
-    if (selected == kFolderMenuAddRenderQueue) {
+    if (selected == kFolderMenuAddHighlights) {
+        addSelectedFolderRunToHighlights();
+    } else if (selected == kFolderMenuAddRenderQueue) {
         addSelectedFolderRunToRenderQueue();
     } else if (selected == kFolderMenuLoadMultiKills) {
         loadSelectedFolderDemoInMultiKills();
@@ -7643,7 +7653,7 @@ void enableDarkTitleBar(HWND window) {
 } // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
-    appendStartupLog(L"ET: Legacy Frag Finder 1.7.4 starting.");
+    appendStartupLog(L"ET: Legacy Frag Finder 1.7.5 starting.");
     try {
     const HRESULT comInitialization =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

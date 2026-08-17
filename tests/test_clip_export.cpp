@@ -143,6 +143,8 @@ int main() {
           "native action must pass start and end seconds");
 
     const std::wstring args = etlfrag::buildEtlClipArguments(source, base, range, settings);
+    check(args.find(L"+set com_zoneMegs 512") == 0,
+          "rendering must raise ETL zone memory on the process command line");
     check(args.find(L"+set s_initsound 1") != std::wstring::npos,
           "audio capture must force the SDL-compatible sound mode");
     check(args.find(L"+set s_muteWhenUnfocused 0") != std::wstring::npos,
@@ -164,6 +166,14 @@ int main() {
               L"+set fs_homepath \"C:/Users/test/Documents/ETLegacy\"") !=
               std::wstring::npos,
           "render launch must explicitly use the selected ETL user-data folder");
+    const std::size_t clipRestart = args.find(L"+vid_restart");
+    const std::size_t clipAction = args.find(
+        L"+set activeAction \"wait 100; seta demo_infoWindow 0;");
+    const std::size_t clipWait = args.find(L"+wait 500", clipAction);
+    const std::size_t clipDemo = args.find(L"+demo", clipWait);
+    check(clipRestart != std::wstring::npos && clipAction > clipRestart &&
+              clipWait > clipAction && clipDemo > clipWait,
+          "render launch must defer the demo during cold start and delay the range action");
 
     const std::wstring configuredArgs = etlfrag::buildEtlClipArguments(
         source,
@@ -176,9 +186,10 @@ int main() {
     const std::size_t renderPosition = configuredArgs.find(L"+set s_initsound 1");
     const std::size_t homePosition = configuredArgs.find(L"+set fs_homepath");
     const std::size_t gamePosition = configuredArgs.find(L"+set fs_game");
-    check(homePosition != std::wstring::npos && gamePosition > homePosition &&
+    const std::size_t zonePosition = configuredArgs.find(L"+set com_zoneMegs 512");
+    check(zonePosition == 0 && homePosition > zonePosition && gamePosition > homePosition &&
               profilePosition > gamePosition && renderPosition > profilePosition,
-          "the selected profile must load before render-specific overrides");
+          "zone memory and the selected profile must load before render-specific overrides");
     check(configuredArgs.find(L"+exec") == std::wstring::npos &&
               configuredArgs.find(L"ff_render_") == std::wstring::npos,
           "rendering must use the selected profile directly without +exec or generated profiles");
@@ -186,22 +197,44 @@ int main() {
           "clip launch must select the mod that owns the source demo");
     check(configuredArgs.find(L"+vid_restart +set activeAction") != std::wstring::npos,
           "render overrides must be latched before the demo action starts");
+    check(configuredArgs.find(
+              L"+set activeAction \"wait 100; seta demo_infoWindow 0;") !=
+              std::wstring::npos &&
+              configuredArgs.find(L"+wait 500 +demo") != std::wstring::npos,
+          "every profiled Render Clip launch must use both compatibility delays");
+
+    etlfrag::ClipExportSettings stockSettings = settings;
+    stockSettings.engineMode = etlfrag::ClipEngineMode::CompatibleVideoPipe;
+    const std::wstring stockArgs = etlfrag::buildEtlClipArguments(
+        source,
+        base,
+        range,
+        stockSettings,
+        L"fragmovie");
+    check(stockArgs.find(
+              L"+set activeAction \"wait 100; seta demo_infoWindow 0; seek 8.000") !=
+              std::wstring::npos &&
+              stockArgs.find(L"+wait 500 +demo") != std::wstring::npos,
+          "stock Render Clip launches must use both compatibility delays");
 
     const std::wstring playbackArgs = etlfrag::buildEtlPlaybackArguments(
         source.demoPath,
         settings.etlHomeFolder,
         L"destiny",
         8000);
+    check(playbackArgs.find(L"com_zoneMegs") == std::wstring::npos,
+          "the high-resolution zone override must remain limited to Render Clip processes");
     const std::size_t playbackHome = playbackArgs.find(L"+set fs_homepath");
     const std::size_t playbackGame = playbackArgs.find(L"+set fs_game");
     const std::size_t playbackProfile = playbackArgs.find(L"+set cl_profile");
     const std::size_t playbackSeek = playbackArgs.find(
-        L"+set activeAction \"seek 8.000\"");
+        L"+set activeAction \"wait 100; seek 8.000\"");
+    const std::size_t playbackWait = playbackArgs.find(L"+wait 500");
     const std::size_t playbackDemo = playbackArgs.find(L"+demo");
     check(playbackHome != std::wstring::npos && playbackGame > playbackHome &&
               playbackProfile > playbackGame && playbackSeek > playbackProfile &&
-              playbackDemo > playbackSeek,
-          "automatic seek must retain fs_homepath, mod and the selected profile");
+              playbackWait > playbackSeek && playbackDemo > playbackWait,
+          "cold-start playback must retain startup settings, defer demo loading and then seek");
     check(playbackArgs.find(L"+exec") == std::wstring::npos &&
               playbackArgs.find(L"ff_play_") == std::wstring::npos,
           "playback must not stage +exec CFGs or create generated profile names");
@@ -212,9 +245,10 @@ int main() {
         L"destiny",
         std::nullopt);
     check(noSeekArgs.find(L"activeAction") == std::wstring::npos &&
+              noSeekArgs.find(L"+wait 500 +demo") != std::wstring::npos &&
               noSeekArgs.find(L"+set cl_profile \"destiny\"") !=
                   std::wstring::npos,
-          "no-seek playback must still retain the selected profile");
+          "no-seek playback must retain the profile and defer cold-start demo loading");
 
     const std::filesystem::path launchFixture =
         std::filesystem::path("build") / "etl-launch-fixture";

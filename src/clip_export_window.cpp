@@ -1268,7 +1268,8 @@ std::wstring renderOverrideCommandList(const ClipExportSettings& settings) {
         : settings.sourceProfileFolder.filename().wstring();
     std::wostringstream commands;
     commands
-        << L"Startup/profile selection\r\n"
+        << L"Startup memory and profile selection\r\n"
+        << L"+set com_zoneMegs " << kEtlRenderZoneMegs << L"\r\n"
         << L"+set fs_homepath \"" << settings.etlHomeFolder.wstring() << L"\"\r\n"
         << L"+set fs_game \"<mod detected from each demo>\"\r\n"
         << L"+set cl_profile \"" << profile << L"\"\r\n\r\n"
@@ -1295,7 +1296,14 @@ std::wstring renderOverrideCommandList(const ClipExportSettings& settings) {
         << L"+seta demo_infoWindow 0\r\n"
         << L"+set cl_videoPipeRangeQuit 1\r\n"
         << L"+vid_restart\r\n\r\n"
-        << L"After the demo becomes active\r\n"
+        << L"Cold-start compatibility\r\n"
+        << L"+set activeAction \"wait "
+        << kEtlPostSnapshotActionDelayFrames
+        << L"; <selected range controller>\"\r\n"
+        << L"+wait " << kEtlColdStartDemoDelayFrames << L"\r\n"
+        << L"+demo \"<absolute demo path>\"\r\n\r\n"
+        << L"After the first active demo snapshot and "
+        << kEtlPostSnapshotActionDelayFrames << L" engine frames\r\n"
         << L"seta demo_infoWindow 0\r\n";
     if (settings.engineMode == ClipEngineMode::NativeVideoPipeRange) {
         commands << L"video-pipe-range <filename> <startTime> <endTime>\r\n";
@@ -1327,9 +1335,11 @@ bool confirmRenderOverrides(const ClipExportSettings& settings) {
         L"Frag Finder is about to override ET: Legacy settings for rendering.";
     dialog.pszContent =
         L"The commands below are applied to the dedicated ETL render process before each "
-        L"queued clip. demo_infoWindow is forced to 0 at startup and again after cgame "
-        L"loads. ETL may save archived cvars in the selected profile; Frag Finder does not "
-        L"automatically restore them after rendering.";
+        L"queued clip. The main ETL zone is raised at process startup for high-resolution "
+        L"video-pipe rendering. Demo loading is delayed during a cold start, and the range controller "
+        L"waits again after cgame produces its first active snapshot. demo_infoWindow is "
+        L"forced to 0 at startup and again after cgame loads. ETL may save archived cvars in "
+        L"the selected profile; Frag Finder does not automatically restore them after rendering.";
     dialog.pszExpandedInformation = commands.c_str();
     dialog.pszExpandedControlText = L"Show exact commands";
     dialog.pszCollapsedControlText = L"Hide exact commands";

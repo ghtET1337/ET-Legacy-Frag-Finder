@@ -12,6 +12,22 @@ Startup hotfix
 - The application version remains 1.7.4 and the manual F9 capture workflow is
   unchanged.
 
+Cold-start demo playback compatibility
+--------------------------------------
+
+- Direct playback no longer executes `demo` while a newly launched ETL client
+  is still processing its startup command line.
+- Frag Finder applies fs_homepath, fs_game and the selected profile first,
+  waits 500 ETL engine frames, and only then executes the absolute demo path.
+- Automatic seek still runs through activeAction after the first active demo
+  snapshot and now waits another 100 engine frames before seeking.
+- The waits affect application startup only; they do not advance demo time or
+  remove any part of the action.
+- Launch without seeking keeps the cold-start delay but does not create an
+  activeAction, allowing playback from the beginning.
+- `playback-launch.log` records both compatibility delays and the complete
+  final arguments for diagnosis.
+
 SQLite session and render-queue recovery
 ----------------------------------------
 

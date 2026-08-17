@@ -1,11 +1,45 @@
 ETL-FRAG-FINDER By ght!
 
-STARTUP HOTFIX (1.7.4)
+HIGH-RESOLUTION RENDER MEMORY FIX (1.7.5)
+
+Render Clip now starts every dedicated ETL process with
+`+set com_zoneMegs 512` before loading the selected homepath, mod, profile or
+demo. ETL's normal 64 MB main zone can be exhausted while a high-resolution
+video-pipe job loads its map and capture buffers, producing `Z_Malloc: failed
+on allocation`. The 512 MB startup override covers the complete supported
+render range through 7680x4320 and appears in the command warning before the
+queue starts. It applies to Render Clip only; normal playback and manual Fast
+Capture are unchanged.
+
+RENDER COLD-START COMPATIBILITY (1.7.5)
+
+Render Clip now uses the same two-stage compatibility sequence as normal demo
+playback. Each dedicated ETL render process applies the selected homepath, mod,
+profile and render settings, performs vid_restart, registers its activeAction,
+waits 500 engine frames and only then loads the demo. After the first active
+snapshot, activeAction waits another 100 engine frames before it seeks and
+starts the selected video-pipe controller. The waits do not advance demo time
+or change the requested clip range.
+
+ACTION CONTEXT MENU (1.7.5)
+
+Right-clicking an action in Folder scan now offers Add to highlights as well as
+Add clip to render queue. The command uses the normal saved highlight basket
+and rejects duplicates exactly like the existing Add to highlights button.
+
+STARTUP HOTFIX (introduced in 1.7.4)
 
 This package fixes the maintenance EXE that could exit silently before opening
 the main window. Future startup exceptions display an error and are written to
-%LOCALAPPDATA%\ETLFragFinder\startup.log. The application remains version 1.7.4
+%LOCALAPPDATA%\ETLFragFinder\startup.log. The application is now version 1.7.5,
 and Fast Capture remains the manual F9 recorder.
+
+DIRECT DEMO PLAYBACK HOTFIX (introduced in 1.7.4)
+
+When Frag Finder starts a new ETL process, it now applies the selected user-data
+folder, mod and profile first, waits inside ETL's command buffer, and only then
+loads the demo. Automatic seek is delayed again until cgame has produced its
+first active snapshot. These waits do not advance demo time or cut the action.
 
 You can copy it/edit and whatever you want to do so.
 
@@ -30,7 +64,7 @@ profile's etconfig.cfg after a timestamped etconfigBEFOREfragfinder backup.
 The corrected build detects profiles from Windows Documents\ETLegacy rather
 than confusing it with the etl.exe installation folder. It explicitly passes
 fs_homepath and the selected cl_profile during normal -5s playback.
-Check README.md and RELEASE-NOTES-1.7.4.txt before the first render; ETL 2.83+
+Check README.md and RELEASE-NOTES-1.7.5.txt before the first render; ETL 2.83+
 and ffmpeg.exe are required. README.md includes the complete FFmpeg setup.
 
 Version 1.7.4 adds explicit Fast capture frame pacing. Smooth constant FPS is
