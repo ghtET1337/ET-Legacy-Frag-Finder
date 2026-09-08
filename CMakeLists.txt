@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ETLFragFinder VERSION 1.7.5 LANGUAGES C CXX)
+project(ETLFragFinder VERSION 1.7.6 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,7 @@ target_compile_definitions(
 
 add_library(etl_demo_parser STATIC
     src/etl_demo_parser.cpp
+    src/demo_cut.cpp
     src/idtech3_huffman.cpp
     src/app_storage.cpp
     src/clip_export.cpp
@@ -44,6 +45,7 @@ if(WIN32)
         ETLFragFinder WIN32
         src/win_main.cpp
         src/clip_export_window.cpp
+        src/demo_cut_window.cpp
         src/realtime_capture_window.cpp
         src/app.rc)
     target_link_libraries(
@@ -68,4 +70,11 @@ if(BUILD_TESTING)
     add_executable(etl-clip-export-tests tests/test_clip_export.cpp)
     target_link_libraries(etl-clip-export-tests PRIVATE etl_demo_parser)
     add_test(NAME clip-export COMMAND etl-clip-export-tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(etl-demo-cut-tests tests/test_demo_cut.cpp)
+    target_link_libraries(etl-demo-cut-tests PRIVATE etl_demo_parser)
+    add_test(NAME demo-cut COMMAND etl-demo-cut-tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/cut-protocol84.dm_84)
 endif()

@@ -251,6 +251,26 @@ HuffmanDecoder::HuffmanDecoder() {
     }
 }
 
+void HuffmanDecoder::transmit(
+    std::uint8_t symbol, std::uint8_t* output,
+    int& bitOffset, int maximumBitOffset) const {
+    std::array<int, 32> reversed{};
+    int count = 0;
+    const Node* node = decoder_.locations[symbol];
+    while (node->parent != nullptr) {
+        if (count == static_cast<int>(reversed.size()))
+            throw std::runtime_error("Invalid Huffman tree depth");
+        reversed[count++] = node->parent->right == node ? 1 : 0;
+        node = node->parent;
+    }
+    if (bitOffset + count > maximumBitOffset)
+        throw std::runtime_error("Cut demo message exceeds the ETL protocol size limit");
+    while (count > 0) {
+        if (reversed[--count]) output[bitOffset >> 3] |= std::uint8_t(1u << (bitOffset & 7));
+        ++bitOffset;
+    }
+}
+
 int HuffmanDecoder::receive(
     const std::uint8_t* input,
     int& bitOffset,

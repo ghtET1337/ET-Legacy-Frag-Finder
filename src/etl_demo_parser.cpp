@@ -2,6 +2,9 @@
 #include "etl_demo_parser.hpp"
 
 #include "idtech3_huffman.hpp"
+#include "idtech3_message_writer.hpp"
+#include "demo_cut.hpp"
+#include <memory>
 
 #include <algorithm>
 #include <array>
@@ -173,7 +176,7 @@ public:
     std::int16_t readShort() { return static_cast<std::int16_t>(readBits(16)); }
     std::int32_t readLong() { return readBits(32); }
 
-    std::string readString(std::size_t maximumLength = 8192) {
+    std::string readString(std::size_t maximumLength = 8192, bool preserveBytes = false) {
         std::string result;
         result.reserve(std::min<std::size_t>(maximumLength, 256));
         while (true) {
@@ -182,7 +185,9 @@ public:
                 return result;
             }
             if (result.size() < maximumLength) {
-                result.push_back(value == '%' ? '.' : static_cast<char>(value));
+                result.push_back(!preserveBytes && value == '%' ? '.' : static_cast<char>(value));
+            } else if (preserveBytes) {
+                throw std::runtime_error("Oversized string in cut source demo");
             }
         }
     }
@@ -223,9 +228,13 @@ struct Snapshot {
     int messageNumber = 0;
     int deltaNumber = -1;
     std::int32_t serverTime = 0;
+    int flags = 0;
+    std::vector<std::uint8_t> areaMask;
     PlayerState playerState{};
     std::vector<EntityState> entities;
 };
+
+#include "demo_cut_writer.inc"
 
 std::int32_t floatBits(float value) {
     std::int32_t bits = 0;
@@ -286,6 +295,8 @@ public:
         resetGameState();
     }
 
+    void enableCut(DemoCutWriter* writer) { cut_ = writer; }
+
     DemoInfo run() {
         std::ifstream input(info_.path, std::ios::binary);
         if (!input) {
@@ -310,7 +321,18 @@ public:
                 "Binary download payloads remain recoverable from those RAW rows.");
         }
 
+        std::error_code sizeError;
+        const auto fileSize = cut_ ? std::filesystem::file_size(info_.path, sizeError) : 0;
+        int lastProgress = -1;
         while (true) {
+            if (cut_) {
+                if (cut_->options().cancel && cut_->options().cancel->load())
+                    throw std::runtime_error("Demo cut cancelled");
+                if (fileSize && !sizeError && cut_->options().progress) {
+                    const int progress = std::min(99, int(100.0 * double(input.tellg()) / double(fileSize)));
+                    if (progress != lastProgress) cut_->options().progress(lastProgress = progress);
+                }
+            }
             bool truncatedField = false;
             const std::optional<std::int32_t> sequence =
                 readLittleLong(input, truncatedField);
@@ -342,9 +364,14 @@ public:
                 addTruncatedDemoWarning("an incomplete final message");
                 break;
             }
+            if (cut_ && *length > 32768) throw std::runtime_error("Demo message exceeds the ETL protocol size limit");
+            if (cut_ && *sequence <= lastCutSequence_) throw std::runtime_error("Demo packet sequence is not increasing");
+            lastCutSequence_ = *sequence;
             parseMessage(*sequence, bytes);
+            if (cut_ && cut_->done()) break;
         }
 
+        if (cut_) return std::move(info_);
         finalizePlayers();
         if (info_.firstServerTimeMs < 0) {
             throw std::runtime_error("The demo does not contain valid snapshots");
@@ -530,6 +557,7 @@ private:
     }
 
     void addTruncatedDemoWarning(std::string_view detail) {
+        if (cut_) throw std::runtime_error("Cannot cut a truncated demo: " + std::string(detail));
         const std::string warning =
             "The demo ends with " + std::string(detail) +
             "; all complete snapshots and events before it were recovered.";
@@ -546,12 +574,14 @@ private:
         appendRawMessage(bytes);
         MessageReader message(bytes, decoder_);
         const std::int32_t reliableAcknowledgement = message.readLong();
+        if (cut_) cut_->beginMessage(reliableAcknowledgement);
         appendProtocolLine(
             "ACK",
             "reliableAcknowledgement=" + std::to_string(reliableAcknowledgement));
 
         int illegibleCommands = 0;
         while (true) {
+            if (cut_ && cut_->done()) break;
             const int command = message.readByte();
             if (command == kSvcEof) {
                 appendProtocolLine("SVC_EOF", "end of decoded message");
@@ -567,28 +597,36 @@ private:
                     break;
                 case kSvcServerCommand: {
                     const std::int32_t commandSequence = message.readLong();
-                    const std::string serverCommand = message.readString();
+                    const std::string serverCommand = message.readString(8192, cut_ != nullptr);
                     appendProtocolLine(
                         "SVC_SERVERCOMMAND",
                         "sequence=" + std::to_string(commandSequence) + "; text=\"" +
                             escapeProtocolText(serverCommand) + "\"");
-                    parseServerCommand(serverCommand);
+                    if (!cut_ || commandSequence > lastCutCommandSequence_) {
+                        if (cut_) {
+                            lastCutCommandSequence_ = commandSequence;
+                            cut_->serverCommand(serverCommand);
+                        }
+                        parseServerCommand(serverCommand);
+                    }
                     break;
                 }
                 case kSvcSnapshot:
                     parseSnapshot(sequence, message);
                     break;
                 case kSvcDownload:
+                    if (cut_) throw std::runtime_error("Download data is not supported by Cut demo");
                     parseDownload(message);
                     break;
                 default:
-                    if (++illegibleCommands > 1) {
+                    if (cut_ || ++illegibleCommands > 1) {
                         throw std::runtime_error("Unknown protocol command in demo message: " +
                                                  std::to_string(command));
                     }
                     break;
             }
         }
+        if (cut_) cut_->finishMessage();
     }
 
     void parseDownload(MessageReader& message) {
@@ -652,9 +690,11 @@ private:
     }
 
     void parseGameState(MessageReader& message) {
+        if (cut_) cut_->reset();
         resetGameState();
         appendProtocolLine("GAMESTATE", "state reset");
         const std::int32_t serverCommandSequence = message.readLong();
+        lastCutCommandSequence_ = serverCommandSequence;
         appendProtocolLine(
             "GAMESTATE",
             "serverCommandSequence=" + std::to_string(serverCommandSequence));
@@ -668,7 +708,7 @@ private:
                 if (index < 0 || index >= kMaxConfigStrings) {
                     throw std::runtime_error("Configstring index is out of range");
                 }
-                setConfigString(index, message.readString(16384));
+                setConfigString(index, message.readString(16384, cut_ != nullptr));
             } else if (command == kSvcBaseline) {
                 const int entityNumber = message.readBits(kEntityNumberBits);
                 if (entityNumber < 0 || entityNumber >= kMaxEntities) {
@@ -677,6 +717,8 @@ private:
                 bool removed = false;
                 baselines_[static_cast<std::size_t>(entityNumber)] =
                     readDeltaEntity(message, EntityState{}, entityNumber, removed);
+                if (cut_ && (removed || entityNumber == kEntityNone))
+                    throw std::runtime_error("Invalid entity baseline in cut source demo");
                 appendEntityState(
                     removed ? "BASELINE_REMOVED" : "BASELINE",
                     baselines_[static_cast<std::size_t>(entityNumber)]);
@@ -688,6 +730,7 @@ private:
 
         info_.povClientNum = message.readLong();
         const std::int32_t checksumFeed = message.readLong();
+        cutChecksumFeed_ = checksumFeed;
         appendProtocolLine(
             "GAMESTATE",
             "povClient=" + std::to_string(info_.povClientNum) +
@@ -836,7 +879,10 @@ private:
         currentServerTimeMs_ = snapshot.serverTime;
         const int deltaDistance = message.readByte();
         snapshot.deltaNumber = deltaDistance == 0 ? -1 : messageNumber - deltaDistance;
+        if (cut_ && deltaDistance && snapshot.deltaNumber <= 0)
+            throw std::runtime_error("Invalid snapshot delta reference");
         const int snapFlags = message.readByte();
+        snapshot.flags = snapFlags;
 
         const Snapshot* old = nullptr;
         if (snapshot.deltaNumber <= 0) {
@@ -859,7 +905,9 @@ private:
         areaMask << std::uppercase << std::hex << std::setfill('0');
         for (int index = 0; index < areaMaskLength; ++index) {
             if (index != 0) areaMask << ' ';
-            areaMask << std::setw(2) << message.readByte();
+            const int value = message.readByte();
+            areaMask << std::setw(2) << value;
+            snapshot.areaMask.push_back(static_cast<std::uint8_t>(value));
         }
         appendProtocolLine(
             "SVC_SNAPSHOT",
@@ -878,6 +926,7 @@ private:
         std::vector<EntityState> changedEntities;
         snapshot.entities = parsePacketEntities(message, old, changedEntities);
         if (!snapshot.valid) {
+            if (cut_) throw std::runtime_error("Cannot cut demo: a snapshot delta base is missing");
             appendProtocolLine(
                 "SNAPSHOT_SKIPPED",
                 "delta base was unavailable; decoded data was not indexed");
@@ -888,9 +937,12 @@ private:
             info_.firstServerTimeMs = snapshot.serverTime;
         }
         info_.lastServerTimeMs = snapshot.serverTime;
+        if (cut_) {
+            cut_->snapshot(snapshot, configStrings_, baselines_, info_.povClientNum, cutChecksumFeed_);
+        }
         for (const EntityState& entity : changedEntities) {
             appendEntityState("ENTITY", entity);
-            processEntityEvent(entity, snapshot.serverTime);
+            if (!cut_) processEntityEvent(entity, snapshot.serverTime);
         }
         appendProtocolLine(
             "SNAPSHOT_COMPLETE",
@@ -916,12 +968,16 @@ private:
             return (*oldEntities)[oldIndex].number;
         };
 
+        int lastNewNumber = -1;
         while (true) {
             const int newNumber = message.readBits(kEntityNumberBits);
             if (newNumber >= kEntityNone) {
                 break;
             }
 
+            if (cut_ && newNumber <= lastNewNumber)
+                throw std::runtime_error("Unsorted or duplicate packet entity in cut source demo");
+            lastNewNumber = newNumber;
             while (oldNumber() < newNumber) {
                 result.push_back((*oldEntities)[oldIndex++]);
             }
@@ -1288,6 +1344,10 @@ private:
         }
     }
 
+    DemoCutWriter* cut_ = nullptr;
+    int cutChecksumFeed_ = 0;
+    int lastCutSequence_ = -1;
+    int lastCutCommandSequence_ = 0;
     static const detail::HuffmanDecoder decoder_;
     DemoParseOptions options_;
     DemoInfo info_;
@@ -1580,6 +1640,18 @@ std::vector<FragRun> findRunsForPlayer(
 }
 
 } // namespace
+
+namespace detail {
+DemoCutResult writeDemoCut(const std::filesystem::path& source, std::ostream& output,
+                           const DemoCutOptions& options) {
+    static const HuffmanDecoder codec;
+    DemoCutWriter writer(output, options, codec);
+    auto parser = std::make_unique<ParserState>(source, DemoParseOptions{});
+    parser->enableCut(&writer);
+    (void)parser->run();
+    return writer.finish();
+}
+} // namespace detail
 
 DemoInfo DemoParser::parse(
     const std::filesystem::path& path,

@@ -1,0 +1,73 @@
+ET: Legacy Frag Finder by ght — 1.7.6
+Release date: 2026-09-07
+
+CONTEXT MENU HOTFIX (version remains 1.7.6)
+
+The initial 1.7.6 package showed only Cut demo in Multi-kill finder,
+All kills / events and Highlights. These tabs now share the complete six-command
+menu with Folder scan, using one menu definition and one command dispatcher:
+Cut demo, Add to highlights, Add clip to render queue, Load demo in Multi-kill
+finder, Open demo file location, and Copy ETL console command (-5s).
+
+The clicked row is selected before the menu opens and its action data is captured
+for dispatch. Sorting/filtering cannot redirect a command to another row or demo.
+Individual events can be saved to Highlights and queued independently. Existing
+highlight and render-queue duplicate protection is retained. Cut encoding,
+playback/render launch settings and the storage format are unchanged.
+Windows x64 GUI rebuilt; version resources and archive checksums verified.
+Interactive Windows menu execution was not available in this build environment.
+
+NEW FEATURE: CUT DEMO (.dm_84)
+
+- Right-click an action in Multi-kill finder, Folder scan, All kills / events
+  or Highlights and select Cut demo (.dm_84)...
+- Independently editable before/after margins, default 5s / 3s; decimal seconds.
+- Range preview, background processing, progress, cancellation, actual range
+  and output size, plus Show saved file after completion.
+- New .dm_84 output preserves the original POV and game state. ETL/FFmpeg are
+  not needed to cut. Map/mod assets are required to play, as with the original.
+- Remember margins and output folder in the separate DemoCut settings section.
+- Also available in etl-frag-cli.exe with --cut, --action-start, --action-end,
+  --before and --after. All times are in source-demo seconds.
+
+FILE FORMAT AND SAFETY
+
+The export rebuilds the gamestate at the cut, including current configstrings,
+entity baselines, client number and checksum feed. The initial snapshot is
+self-contained; subsequent snapshots are encoded against snapshots in the cut.
+Player/entity data, area masks, flags and original server times are preserved.
+Commands are deduplicated and renumbered; an incomplete fragmented configstring
+crossing the first snapshot is retained. Output ends with the proper demo marker.
+
+The source and existing destinations are never overwritten. Work is written in
+an exclusive temporary directory and committed only after success, without
+replacing a destination that appeared concurrently. Error/cancel cleanup removes
+the temporary data.
+
+Cuts follow recorded snapshots. The end includes the next available snapshot
+at/after the requested end, and at least two snapshots are required. The saved
+range is reported. Margins are limited by the recording; an action outside the
+available data is rejected. Single-map protocol-84 client demos are supported.
+Unsupported commands, missing delta bases and malformed data encountered during
+the cut fail explicitly. This does not convert .tv_84/.sv_84 or add missing POVs.
+
+VALIDATION
+
+- Existing frag/parser/storage tests and clip-export tests passed.
+- New end-to-end cut tests cover ranges, zero margins, boundary rounding,
+  beginning/end limits, metadata, kills, re-cutting, fragmented configstrings,
+  existing/concurrent files, corrupted data and cancellation cleanup.
+- Independent ET: Legacy MSG/Huffman reference decoder: seven cut ranges and
+  231 snapshots compared with their original complete decoded state. All
+  player/entity state bytes, area masks and flags matched. A separate initial
+  46-snapshot cut also passed the same comparison.
+- Native Windows x64 executables rebuilt with version 1.7.6 resources.
+- This environment could not run Windows/ETL playback. The tests above validate
+  the file protocol, not a visual in-game playback session on a user's setup.
+
+RETAINED FROM 1.7.5
+
+The 500-frame cold-start delay, 100-frame post-snapshot action delay and Render
+Clip com_zoneMegs 512 launch setting are retained. No change to normal playback,
+Fast Capture, render behavior, saved indexes, highlights or the render queue.
+Full source, build scripts, tests and bundled FFmpeg are included.

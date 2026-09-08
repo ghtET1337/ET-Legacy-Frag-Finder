@@ -2,6 +2,7 @@
 #include "etl_demo_parser.hpp"
 #include "app_storage.hpp"
 #include "clip_export_window.hpp"
+#include "demo_cut_window.hpp"
 #include "realtime_capture_window.hpp"
 
 #include <windows.h>
@@ -54,6 +55,7 @@ constexpr UINT kFolderMenuCopyConsoleCommand = 9102;
 constexpr UINT kFolderMenuAddRenderQueue = 9103;
 constexpr UINT kFolderMenuLoadMultiKills = 9104;
 constexpr UINT kFolderMenuAddHighlights = 9105;
+constexpr UINT kMenuCutDemo = 9106;
 constexpr UINT kEtlSetupProfileDefault = 9201;
 constexpr UINT kEtlSetupChooseHome = 9202;
 constexpr UINT kEtlSetupRefreshProfiles = 9203;
@@ -431,9 +433,7 @@ void showTab(int tab);
 void searchRuns();
 void searchLibrary(bool reportStatus);
 etlfrag::DemoSearchField selectedSearchField(HWND fieldControl);
-void addSelectedFolderRunToRenderQueue();
 void addSelectedFolderRunToHighlights();
-void loadSelectedFolderDemoInMultiKills();
 
 int scale(int value) {
     return MulDiv(value, gApp.dpi, 96);
@@ -3717,7 +3717,7 @@ void playAtPath(
             if (log) {
                 SYSTEMTIME now{};
                 GetLocalTime(&now);
-                log << "ET: Legacy Frag Finder 1.7.5 playback launch\r\n"
+                log << "ET: Legacy Frag Finder 1.7.6 playback launch\r\n"
                     << "Time: " << std::setfill('0') << std::setw(4) << now.wYear << '-'
                     << std::setw(2) << now.wMonth << '-' << std::setw(2) << now.wDay << ' '
                     << std::setw(2) << now.wHour << ':' << std::setw(2) << now.wMinute << ':'
@@ -3850,10 +3850,8 @@ bool copyUnicodeText(const std::wstring& value) {
     return copied;
 }
 
-void openSelectedFolderDemoLocation() {
-    const FolderRunResult* result = selectedFolderRunResult();
-    if (result == nullptr) return;
-    if (!std::filesystem::is_regular_file(result->demo.path)) {
+void openDemoLocation(const std::filesystem::path& demoPath) {
+    if (!std::filesystem::is_regular_file(demoPath)) {
         MessageBoxW(
             gApp.window,
             L"The selected demo file no longer exists.",
@@ -3862,7 +3860,7 @@ void openSelectedFolderDemoLocation() {
         return;
     }
     const std::filesystem::path absolute =
-        std::filesystem::absolute(result->demo.path).lexically_normal();
+        std::filesystem::absolute(demoPath).lexically_normal();
     const std::wstring parameters = L"/select,\"" + absolute.wstring() + L"\"";
     const HINSTANCE opened = ShellExecuteW(
         gApp.window,
@@ -3880,18 +3878,16 @@ void openSelectedFolderDemoLocation() {
     }
 }
 
-void copySelectedFolderConsoleCommand() {
-    const FolderRunResult* result = selectedFolderRunResult();
-    if (result == nullptr) return;
+void copyActionConsoleCommand(const etlfrag::ClipSource& source) {
     const std::int32_t seekMs = std::max<std::int32_t>(
         0,
-        result->run.startDemoTimeMs - kPlaybackPrerollMs);
+        source.actionStartMs - kPlaybackPrerollMs);
     std::wostringstream seconds;
     seconds.setf(std::ios::fixed);
     seconds.precision(3);
     seconds << static_cast<double>(seekMs) / 1000.0;
     const std::filesystem::path absolute =
-        std::filesystem::absolute(result->demo.path).lexically_normal();
+        std::filesystem::absolute(source.demoPath).lexically_normal();
     const std::wstring command =
         L"set activeAction \"seek " + seconds.str() +
         L"\"; demo \"" + absolute.generic_wstring() + L"\"";
@@ -3908,10 +3904,7 @@ void copySelectedFolderConsoleCommand() {
     }
 }
 
-void loadSelectedFolderDemoInMultiKills() {
-    const FolderRunResult* result = selectedFolderRunResult();
-    if (result == nullptr) return;
-    const std::filesystem::path demoPath = result->demo.path;
+void loadDemoInMultiKills(const std::filesystem::path& demoPath) {
     std::error_code error;
     if (!std::filesystem::is_regular_file(demoPath, error) || error) {
         MessageBoxW(
@@ -3923,48 +3916,6 @@ void loadSelectedFolderDemoInMultiKills() {
     }
     showTab(0);
     loadDemo(demoPath);
-}
-
-void showFolderRunContextMenu() {
-    if (selectedFolderRunResult() == nullptr) return;
-    HMENU menu = CreatePopupMenu();
-    if (menu == nullptr) return;
-    AppendMenuW(menu, MF_STRING, kFolderMenuAddHighlights, L"Add to highlights");
-    AppendMenuW(menu, MF_STRING, kFolderMenuAddRenderQueue, L"Add clip to render queue");
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        kFolderMenuLoadMultiKills,
-        L"Load demo in Multi-kill finder");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kFolderMenuOpenLocation, L"Open demo file location");
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        kFolderMenuCopyConsoleCommand,
-        L"Copy ETL console command (-5s)");
-    POINT position{};
-    GetCursorPos(&position);
-    const UINT selected = TrackPopupMenu(
-        menu,
-        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-        position.x,
-        position.y,
-        0,
-        gApp.window,
-        nullptr);
-    DestroyMenu(menu);
-    if (selected == kFolderMenuAddHighlights) {
-        addSelectedFolderRunToHighlights();
-    } else if (selected == kFolderMenuAddRenderQueue) {
-        addSelectedFolderRunToRenderQueue();
-    } else if (selected == kFolderMenuLoadMultiKills) {
-        loadSelectedFolderDemoInMultiKills();
-    } else if (selected == kFolderMenuOpenLocation) {
-        openSelectedFolderDemoLocation();
-    } else if (selected == kFolderMenuCopyConsoleCommand) {
-        copySelectedFolderConsoleCommand();
-    }
 }
 
 void playSelectedFolderRun() {
@@ -4019,21 +3970,6 @@ etlfrag::ClipSource clipSourceForFolderRun(const FolderRunResult& result) {
     source.actionStartMs = result.run.startDemoTimeMs;
     source.actionEndMs = result.run.endDemoTimeMs;
     return source;
-}
-
-void addSelectedFolderRunToRenderQueue() {
-    const FolderRunResult* result = selectedFolderRunResult();
-    if (result == nullptr) return;
-    const std::optional<std::size_t> added =
-        enqueueClipExporter({clipSourceForFolderRun(*result)});
-    if (!added.has_value()) return;
-    if (*added > 0) {
-        setStatus(
-            L"Clip added to the render queue without opening it. Select Render clip queue "
-            L"when you are ready to review or render the collected actions.");
-    } else {
-        setStatus(L"That action is already present in the clip render queue.");
-    }
 }
 
 void renderSelectedRun() {
@@ -4251,6 +4187,119 @@ etlfrag::ClipSource clipSourceForHighlight(const etlfrag::HighlightItem& highlig
     source.actionStartMs = highlight.startDemoTimeMs;
     source.actionEndMs = highlight.endDemoTimeMs;
     return source;
+}
+
+// Resolve the clicked row through its stored item data, so sorting/filtering
+// cannot redirect an operation to a different action or another tab's demo.
+struct ActionSelection {
+    etlfrag::ClipSource source;
+    etlfrag::HighlightItem highlight;
+};
+
+etlfrag::HighlightItem makeEventHighlight(std::size_t index) {
+    const auto& event = gApp.demo.kills[index];
+    etlfrag::FragRun run;
+    run.attacker = event.attacker;
+    run.attackerSessionId = event.attackerSessionId;
+    run.attackerName = event.attackerName;
+    run.startDemoTimeMs = run.endDemoTimeMs = event.demoTimeMs;
+    run.killIndices = {index};
+
+    // Reuse the existing hit-counting rules for this one-event action. Keep
+    // only its own life/lead-in and confirmed hits, not neighbouring kills.
+    int firstHitMs = std::max(0, event.demoTimeMs - kPlaybackPrerollMs);
+    for (const auto& previous : gApp.demo.kills) {
+        if (previous.demoTimeMs >= event.demoTimeMs) break;
+        if (previous.demoTimeMs >= firstHitMs && previous.target == event.attacker &&
+            (event.attackerSessionId < 0 || previous.targetSessionId < 0 ||
+             previous.targetSessionId == event.attackerSessionId))
+            firstHitMs = previous.demoTimeMs + 1;
+    }
+    etlfrag::DemoInfo singleEvent;
+    singleEvent.kills.push_back(event);
+    const auto first = std::lower_bound(gApp.demo.hits.begin(), gApp.demo.hits.end(), firstHitMs,
+        [](const etlfrag::HitEvent& hit, int time) { return hit.demoTimeMs < time; });
+    for (auto hit = first; hit != gApp.demo.hits.end() && hit->demoTimeMs <= event.demoTimeMs; ++hit)
+        singleEvent.hits.push_back(*hit);
+    etlfrag::RunFilter filter;
+    filter.minimumKills = 1;
+    filter.includeTeamKills = true;
+    filter.includeWarmupKills = true;
+    const auto runs = etlfrag::findFragRuns(singleEvent, filter);
+    if (!runs.empty()) run.headshotCount = runs.front().headshotCount;
+    return makeHighlight(gApp.demo, run);
+}
+
+std::optional<ActionSelection> selectedAction(HWND list) {
+    ActionSelection selection;
+    const int index = selectedListData(list);
+    if (index < 0) return std::nullopt;
+    if (list == gApp.folderRunList) {
+        const auto* result = selectedFolderRunResult();
+        if (!result) return std::nullopt;
+        selection.source = clipSourceForFolderRun(*result);
+        selection.highlight = makeHighlight(*result);
+    } else if (list == gApp.runList && index < static_cast<int>(gApp.runs.size())) {
+        const auto& run = gApp.runs[index];
+        selection.highlight = makeHighlight(gApp.demo, run);
+        selection.source = clipSourceForHighlight(selection.highlight);
+    } else if (list == gApp.allEventList && index < static_cast<int>(gApp.demo.kills.size())) {
+        const auto& event = gApp.demo.kills[index];
+        selection.highlight = makeEventHighlight(static_cast<std::size_t>(index));
+        selection.source = clipSourceForHighlight(selection.highlight);
+        selection.source.label = toWide(event.attackerName) + L" vs " + toWide(event.targetName);
+    } else if (list == gApp.highlightList && index < static_cast<int>(gApp.highlights.size())) {
+        selection.highlight = gApp.highlights[index];
+        selection.source = clipSourceForHighlight(selection.highlight);
+    } else return std::nullopt;
+    return selection;
+}
+
+// One menu and one dispatcher for every action tab. Capture the selection
+// before TrackPopupMenu starts its message loop; each command uses that copy.
+void showActionContextMenu(HWND list) {
+    const auto action = selectedAction(list);
+    if (!action) return;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, kMenuCutDemo, L"Cut demo (.dm_84)...");
+    AppendMenuW(menu, MF_STRING, kFolderMenuAddHighlights, L"Add to highlights");
+    AppendMenuW(menu, MF_STRING, kFolderMenuAddRenderQueue, L"Add clip to render queue");
+    AppendMenuW(menu, MF_STRING, kFolderMenuLoadMultiKills, L"Load demo in Multi-kill finder");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kFolderMenuOpenLocation, L"Open demo file location");
+    AppendMenuW(menu, MF_STRING, kFolderMenuCopyConsoleCommand, L"Copy ETL console command (-5s)");
+    POINT point{};
+    GetCursorPos(&point);
+    const UINT selected = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                                         point.x, point.y, 0, gApp.window, nullptr);
+    DestroyMenu(menu);
+    switch (selected) {
+        case kMenuCutDemo:
+            etlfrag::cutui::open(gApp.window, action->source, gApp.iniPath);
+            break;
+        case kFolderMenuAddHighlights:
+            addHighlightItem(action->highlight);
+            break;
+        case kFolderMenuAddRenderQueue: {
+            const auto added = enqueueClipExporter({action->source});
+            if (added.has_value()) {
+                setStatus(*added > 0
+                    ? L"Clip added to the render queue without opening it. Select Render clip queue when you are ready."
+                    : L"That action is already present in the clip render queue.");
+            }
+            break;
+        }
+        case kFolderMenuLoadMultiKills:
+            loadDemoInMultiKills(action->source.demoPath);
+            break;
+        case kFolderMenuOpenLocation:
+            openDemoLocation(action->source.demoPath);
+            break;
+        case kFolderMenuCopyConsoleCommand:
+            copyActionConsoleCommand(action->source);
+            break;
+    }
 }
 
 void renderSelectedHighlight() {
@@ -7482,17 +7531,16 @@ LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 sortListByColumn(notification->hwndFrom, columnClick->iSubItem);
                 return 0;
             }
-            if (notification->idFrom == IdFolderRunList &&
-                notification->code == NM_RCLICK) {
+            if (notification->code == NM_RCLICK &&
+                (notification->idFrom == IdRunList || notification->idFrom == IdAllEventList ||
+                 notification->idFrom == IdFolderRunList || notification->idFrom == IdHighlightList)) {
                 const auto* activated = reinterpret_cast<NMITEMACTIVATE*>(lParam);
                 if (activated->iItem >= 0) {
-                    ListView_SetItemState(
-                        gApp.folderRunList,
-                        activated->iItem,
-                        LVIS_SELECTED | LVIS_FOCUSED,
-                        LVIS_SELECTED | LVIS_FOCUSED);
-                    SetFocus(gApp.folderRunList);
-                    showFolderRunContextMenu();
+                    ListView_SetItemState(notification->hwndFrom, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+                    ListView_SetItemState(notification->hwndFrom, activated->iItem,
+                                          LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                    SetFocus(notification->hwndFrom);
+                    showActionContextMenu(notification->hwndFrom);
                 }
                 return 0;
             }
@@ -7653,7 +7701,7 @@ void enableDarkTitleBar(HWND window) {
 } // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
-    appendStartupLog(L"ET: Legacy Frag Finder 1.7.5 starting.");
+    appendStartupLog(L"ET: Legacy Frag Finder 1.7.6 starting.");
     try {
     const HRESULT comInitialization =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

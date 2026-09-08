@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "etl_demo_parser.hpp"
+#include "demo_cut.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -149,6 +150,7 @@ void printRuns(const etlfrag::DemoInfo& demo, const etlfrag::RunFilter& filter) 
 }
 
 void printUsage() {
+    std::cout << "Cut: etl-frag-cli demo.dm_84 --cut action.dm_84 --action-start 120 --action-end 124 --before 5 --after 3\n\n";
     std::cerr
         << "Usage:\n"
         << "  etl-frag-cli <file.dm_84> [--json]\n"
@@ -207,6 +209,9 @@ int main(int argc, char** argv) {
     try {
         bool json = false;
         bool runs = false;
+        std::filesystem::path cutOutput;
+        etlfrag::DemoCutOptions cut;
+        bool haveStart = false, haveEnd = false;
         etlfrag::RunFilter filter;
         for (int index = 2; index < argc; ++index) {
             const std::string option = argv[index];
@@ -216,7 +221,19 @@ int main(int argc, char** argv) {
                 }
                 return argv[index];
             };
-            if (option == "--json") {
+            if (option == "--cut") {
+                cutOutput = std::filesystem::u8path(requireValue());
+            } else if (option == "--action-start") {
+                cut.actionStartMs = parseSecondsOption(requireValue(), option, 0.0, 2000000.0);
+                haveStart = true;
+            } else if (option == "--action-end") {
+                cut.actionEndMs = parseSecondsOption(requireValue(), option, 0.0, 2000000.0);
+                haveEnd = true;
+            } else if (option == "--before") {
+                cut.beforeMs = parseSecondsOption(requireValue(), option, 0.0, 3600.0);
+            } else if (option == "--after") {
+                cut.afterMs = parseSecondsOption(requireValue(), option, 0.0, 3600.0);
+            } else if (option == "--json") {
                 json = true;
             } else if (option == "--runs") {
                 runs = true;
@@ -255,6 +272,16 @@ int main(int argc, char** argv) {
         if (json && runs) {
             throw std::invalid_argument("--json and --runs cannot be used together");
         }
+        if (!cutOutput.empty()) {
+            if (!haveStart || !haveEnd) throw std::invalid_argument("--cut requires --action-start and --action-end (demo seconds)");
+            if (json || runs) throw std::invalid_argument("--cut cannot be combined with --json or --runs");
+            const auto result = etlfrag::cutDemo(std::filesystem::u8path(argv[1]), cutOutput, cut);
+            std::cout << "Saved cut demo: " << cutOutput.u8string() << "\nRange: "
+                      << result.actualStartMs << ".." << result.actualEndMs << " ms\nSnapshots: "
+                      << result.snapshots << "\nBytes: " << result.bytes << '\n';
+            return EXIT_SUCCESS;
+        }
+        if (haveStart || haveEnd) throw std::invalid_argument("Action times require --cut");
         const etlfrag::DemoInfo demo = etlfrag::DemoParser{}.parse(argv[1]);
         if (json) {
             printJson(demo);

@@ -11,6 +11,8 @@ public:
     HuffmanDecoder();
 
     int receive(const std::uint8_t* input, int& bitOffset, int maximumBitOffset) const;
+    void transmit(std::uint8_t symbol, std::uint8_t* output,
+                  int& bitOffset, int maximumBitOffset) const;
 
 private:
     static constexpr int SymbolCount = 256;

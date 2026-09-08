@@ -1,8 +1,45 @@
 # ET: Legacy Frag Finder by ght
 
-ET: Legacy Frag Finder is a native Windows tool for indexing demo collections, finding multi-kills, building a clip shortlist and manually reviewing every obituary event stored in ET: Legacy `.dm_84` demos. It reads the binary protocol directly; no server log and no running game client are required for analysis. It works with "pure" Legacy demos and might not work with nitmod, jaymod and other mods demos at the moment.
+ET: Legacy Frag Finder is a native Windows tool for indexing demo collections, finding multi-kills, building a clip shortlist and manually reviewing every obituary event stored in ET: Legacy `.dm_84` demos. It reads the binary protocol directly; no server log and no running game client are required for analysis.
 
-## Version 1.7.5
+## Version 1.7.6 — Cut demo (.dm_84)
+
+**Context-menu correction (same version 1.7.6):** Multi-kill finder, All kills / events,
+Folder scan and Highlights now use the same complete right-click menu, in this order:
+
+1. Cut demo (.dm_84)...
+2. Add to highlights
+3. Add clip to render queue
+4. Load demo in Multi-kill finder
+5. Open demo file location
+6. Copy ETL console command (-5s)
+
+Every command targets the clicked row, including sorted/filtered results. A single
+All kills / events row is added/exported as a single-event action. Adding an existing
+Highlight again uses the normal duplicate protection. Adding to the render queue
+does not open the exporter window.
+
+Right-click an action in **Multi-kill finder**, **Folder scan**, **All kills / events** or **Highlights**, then choose **Cut demo (.dm_84)...**. Enter **Seconds before the first frag** and **Seconds after the last frag**, check the displayed range, and select **Save cut demo...**. Defaults are 5 seconds before and 3 seconds after; decimal values (including a decimal comma) are supported. Margins and the last output folder are remembered separately from Render Clip.
+
+The result is a new, standalone `.dm_84` client demo, ready to send to a fragmovie editor. Cutting runs locally in the background, has progress/cancellation, and requires neither ETL nor FFmpeg. After saving, **Show saved file** opens its location. Existing files, including the original demo, are never overwritten.
+
+The cut contains a reconstructed current gamestate, entity baselines, the original client/checksum information, a complete initial snapshot and correctly re-encoded subsequent snapshots. Player state, entity state, area masks, event timestamps and commands within the cut are retained. Reliable commands are renumbered; repeated commands are deduplicated and incomplete `bcs` configstring fragments at the start are replayed. The original game clock and trajectories are preserved; the new demo's local playback clock begins at the cut.
+
+Cuts follow recorded snapshots: the start uses the first snapshot at or after the requested start, and the end includes the first snapshot at or after the requested end. The window reports the actual saved range. At least two snapshots are needed to play a demo, so a single event with zero margins includes the following snapshot. A pre-roll that extends before the recording starts is limited to zero; a post-roll beyond the recording ends at the final available snapshot. The selected action itself must be fully present.
+
+The original recorded POV is retained. The recipient needs the map and a compatible mod to play the file, just as for the source demo. Protocol-84 client demos (`.dm_84`) are supported; server/TV demos, unsupported opcodes, missing delta bases, damaged data encountered while cutting and cuts across map/time resets are rejected with a message. No incomplete output is published after an error or cancellation.
+
+This release keeps the 1.7.5 cold-start waits, Render Clip `com_zoneMegs 512`, Fast Capture, SQLite session, render queue and highlights behavior.
+
+CLI equivalent (all times in seconds from the source demo start):
+
+```text
+etl-frag-cli.exe original.dm_84 --cut action.dm_84 --action-start 120 --action-end 124 --before 5 --after 3
+```
+
+For example, the requested output range is 01:55–02:07. Use a new output filename.
+
+## Previous release: 1.7.5
 
 Version 1.7.5 applies the proven cold-start compatibility sequence to **Render Clip** as well as normal action playback. It also fixes high-resolution Render Clip launches that could terminate with `Server fatal crashed: Z_Malloc: failed on allocation`. Every dedicated render process now starts with `+set com_zoneMegs 512` before the selected `fs_homepath`, mod, profile or demo is loaded, raising ETL's normal 64 MB main zone early enough to cover the supported render range through 7680×4320. After `vid_restart`, Frag Finder registers the range controller in `activeAction`, waits 500 ETL engine frames before loading the demo, and waits another 100 engine frames after the first active demo snapshot before seeking or starting the video pipe. These waits occur outside demo time and do not shorten, shift or otherwise change the requested clip range.
 
@@ -38,6 +75,8 @@ The high-FPS maintenance work adds **Fast capture**, a real-time Desktop Duplica
 6. Select **Render clip** to add the action and open the video queue, or use **Render clip queue** to inspect jobs already collected without adding another action. **Add to highlights** saves an action for later batch rendering.
 7. Open **Demo library**, or use the search row in **Folder scan**, to search indexed demos by nickname, map, recording date or filename.
 8. For a fast real-time recording instead of ETL's slower offline video pipe, select **Fast capture**, read the display-safety warning, copy/apply the windowed-mode commands, choose 250 FPS or higher and press **F9** to start or stop.
+
+Right-click an action and choose **Cut demo (.dm_84)...** to share a short demo file.
 
 Double-clicking a multi-kill, individual event or saved highlight starts playback as well. The graphical timeline can be clicked to jump to the nearest row.
 

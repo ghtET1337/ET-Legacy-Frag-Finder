@@ -7,3 +7,5 @@ ET: Legacy is distributed under the GNU General Public License v3.0. Official so
 The Huffman decoder implementation and frequency table in `src/idtech3_huffman.cpp` are derivative of the ET: Legacy protocol implementation. ET: Legacy Frag Finder is therefore distributed under GPL-3.0-or-later. The complete license text is included in `COPYING.txt`.
 
 SQLite 3.44.2 is compiled into the application from the public-domain amalgamation in `third_party/sqlite`. The upstream dedication is included in `third_party/sqlite/LICENSE.md`. Official site: <https://www.sqlite.org/>.
+
+The protocol-84 writer added in 1.7.6 implements the ET: Legacy gamestate and delta-message layout from `src/client/cl_demo.c` and `src/qcommon/msg.c`; the Huffman encoder uses the same ET: Legacy-derived tree. It is covered by GPL-3.0-or-later as part of this application. The synthetic test fixture contains no game assets or third-party player recording.
