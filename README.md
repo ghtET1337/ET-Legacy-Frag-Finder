@@ -1,6 +1,6 @@
 # ET: Legacy Frag Finder by ght
 
-ET: Legacy Frag Finder is a native Windows tool for indexing demo collections, finding multi-kills, building a clip shortlist and manually reviewing every obituary event stored in ET: Legacy `.dm_84` demos. It reads the binary protocol directly; no server log and no running game client are required for analysis.
+ET: Legacy Frag Finder is a native Windows tool for indexing demo collections, finding multi-kills, building a clip shortlist and manually reviewing every obituary event stored in ET: Legacy `.dm_84` demos. It reads the binary protocol directly; no server log and no running game client are required for analysis. It works with "pure" legacy demos and might not work with etpro, nitmod, jaymod and other mods.
 
 ## Version 1.7.6 — Cut demo (.dm_84)
 
